@@ -1,0 +1,42 @@
+# Virtual environment
+.venv/
+
+# Environment variables
+.env
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE
+.vscode/
+
+# Logs
+logs/
+*.log
+
+# Local database
+*.db
+*.sqlite
+*.sqlite3
+
+# Uploaded/private documents
+data/uploads/
+data/processed/
+
+# Vector database
+data/chroma/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Python testing/cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Secrets
+*.pem
+*.key
