@@ -4,10 +4,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.services.retrieval_service import (
+    build_retrieval_query,
     get_max_distance,
     retrieve_chunks,
 )
-
 
 def test_retrieval_rejects_empty_query():
     with pytest.raises(ValueError):
@@ -247,3 +247,36 @@ def test_retrieval_explicit_max_distance(
 
     assert len(results) == 1
     assert results[0]["distance"] == 0.50
+def test_build_retrieval_query_rewrites_generic_image_question():
+    result = build_retrieval_query(
+        "What is this image about?"
+    )
+
+    assert result == (
+        "Describe the main topic, subject, course, document, "
+        "or information shown in the uploaded image or document."
+    )
+
+
+def test_build_retrieval_query_rewrites_screenshot_question():
+    result = build_retrieval_query(
+        "What does this screenshot show?"
+    )
+
+    assert result == (
+        "Describe the main topic, subject, course, document, "
+        "or information shown in the uploaded image or document."
+    )
+
+
+def test_build_retrieval_query_preserves_specific_question():
+    query = "What problem does MindSync aim to solve?"
+
+    result = build_retrieval_query(query)
+
+    assert result == query
+
+
+def test_build_retrieval_query_rejects_empty_query():
+    with pytest.raises(ValueError):
+        build_retrieval_query("   ")

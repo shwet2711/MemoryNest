@@ -9,6 +9,11 @@ from app.services.vector_store import get_collection
 
 DEFAULT_MAX_DISTANCE = 0.70
 
+GENERIC_ABOUT_QUERY = (
+    "Describe the main topic, subject, course, document, "
+    "or information shown in the uploaded image or document."
+)
+
 
 def get_max_distance() -> float:
     """
@@ -34,6 +39,90 @@ def get_max_distance() -> float:
         )
 
     return value
+
+
+def build_retrieval_query(query: str) -> str:
+    """
+    Convert generic image, screenshot, and document description
+    questions into a retrieval-friendly semantic query.
+
+    The original user query is still used for the final answer.
+    This transformation is only used when generating the
+    retrieval embedding.
+    """
+
+    if not isinstance(query, str):
+        raise TypeError("Query must be a string.")
+
+    normalized = " ".join(
+        query.strip().lower().split()
+    )
+
+    if not normalized:
+        raise ValueError("Query cannot be empty.")
+
+    generic_queries = {
+        # Image questions
+        "what is this image about",
+        "what is this image about?",
+        "what does this image show",
+        "what does this image show?",
+        "what information is shown in this image",
+        "what information is shown in this image?",
+        "what information does this image contain",
+        "what information does this image contain?",
+        "what is shown in this image",
+        "what is shown in this image?",
+        "what can you tell me about this image",
+        "what can you tell me about this image?",
+        "tell me about this image",
+        "tell me about this image.",
+        "describe this image",
+        "describe this image.",
+        "describe the image",
+        "describe the image.",
+
+        # Screenshot questions
+        "what is this screenshot about",
+        "what is this screenshot about?",
+        "what does this screenshot show",
+        "what does this screenshot show?",
+        "what information is shown in this screenshot",
+        "what information is shown in this screenshot?",
+        "what information does this screenshot contain",
+        "what information does this screenshot contain?",
+        "what is shown in this screenshot",
+        "what is shown in this screenshot?",
+        "what can you tell me about this screenshot",
+        "what can you tell me about this screenshot?",
+        "tell me about this screenshot",
+        "tell me about this screenshot.",
+        "describe this screenshot",
+        "describe this screenshot.",
+
+        # Document questions
+        "what is this document about",
+        "what is this document about?",
+        "what does this document show",
+        "what does this document show?",
+        "what information is shown in this document",
+        "what information is shown in this document?",
+        "what information does this document contain",
+        "what information does this document contain?",
+        "what is shown in this document",
+        "what is shown in this document?",
+        "what can you tell me about this document",
+        "what can you tell me about this document?",
+        "tell me about this document",
+        "tell me about this document.",
+        "describe this document",
+        "describe this document.",
+    }
+
+    if normalized in generic_queries:
+        return GENERIC_ABOUT_QUERY
+
+    return query.strip()
 
 
 def _build_where(
@@ -113,7 +202,11 @@ def retrieve_chunks(
     if matching_count == 0:
         return []
 
-    query_embedding = generate_embedding(query)
+    retrieval_query = build_retrieval_query(query)
+
+    query_embedding = generate_embedding(
+        retrieval_query
+    )
 
     results = collection.query(
         query_embeddings=[query_embedding],

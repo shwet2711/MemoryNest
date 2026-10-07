@@ -6,6 +6,7 @@ from app.services.chunk_service import (
     get_document_chunks,
     process_document_chunks,
 )
+from app.services.indexing_service import index_document
 from app.services.document_service import (
     create_document,
     delete_document,
@@ -312,11 +313,23 @@ def documents_page() -> None:
 
                         file_bytes = uploaded_file.getvalue()
 
-                        create_document(
+                        document = create_document(
                             db=db,
                             user_id=user_id,
                             filename=uploaded_file.name,
                             file_bytes=file_bytes,
+                        )
+
+                        process_document_chunks(
+                            db=db,
+                            document=document,
+                            user_id=user_id,
+                        )
+
+                        index_document(
+                            db=db,
+                            document_id=document.id,
+                            user_id=user_id,
                         )
 
                         successful += 1

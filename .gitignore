@@ -21,15 +21,8 @@ logs/
 *.sqlite
 *.sqlite3
 
-# Uploaded/private documents
-# Uploaded/private documents
-data/uploads/
-data/processed/
-data/chunks/
-data/extracted/
-
-# Vector database
-data/chroma/
+# Local runtime and user data
+data/
 
 # OS files
 .DS_Store
