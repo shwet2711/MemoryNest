@@ -1,8 +1,58 @@
-
 from __future__ import annotations
+
+import os
+from typing import Any
 
 from app.services.embedding_service import generate_embedding
 from app.services.vector_store import get_collection
+
+
+DEFAULT_MAX_DISTANCE = 0.70
+
+
+def get_max_distance() -> float:
+    """
+    Return the maximum accepted Chroma cosine distance.
+
+    Lower cosine distance means stronger semantic similarity.
+    """
+    raw_value = os.getenv(
+        "MEMORYNEST_RAG_MAX_DISTANCE",
+        str(DEFAULT_MAX_DISTANCE),
+    ).strip()
+
+    try:
+        value = float(raw_value)
+    except ValueError as exc:
+        raise ValueError(
+            "MEMORYNEST_RAG_MAX_DISTANCE must be a valid number."
+        ) from exc
+
+    if value < 0:
+        raise ValueError(
+            "MEMORYNEST_RAG_MAX_DISTANCE cannot be negative."
+        )
+
+    return value
+
+
+def _build_where(
+    *,
+    user_id: int,
+    document_id: int | None,
+) -> dict[str, Any]:
+    """Build a user/document scoped Chroma filter."""
+    filters: list[dict[str, Any]] = [
+        {"user_id": user_id},
+    ]
+
+    if document_id is not None:
+        filters.append({"document_id": document_id})
+
+    if len(filters) == 1:
+        return filters[0]
+
+    return {"$and": filters}
 
 
 def retrieve_chunks(
@@ -10,13 +60,14 @@ def retrieve_chunks(
     user_id: int,
     top_k: int = 5,
     document_id: int | None = None,
+    max_distance: float | None = None,
 ) -> list[dict]:
     """
     Retrieve relevant chunks from the current user's knowledge base.
 
-    Results include source metadata and cosine distance.
+    Results are filtered by semantic distance so weakly related
+    chunks are not automatically treated as supporting evidence.
     """
-
     if not isinstance(query, str):
         raise TypeError("Query must be a string.")
 
@@ -34,6 +85,12 @@ def retrieve_chunks(
     if document_id is not None and document_id < 1:
         raise ValueError("Document ID must be positive.")
 
+    if max_distance is None:
+        max_distance = get_max_distance()
+
+    if max_distance < 0:
+        raise ValueError("max_distance cannot be negative.")
+
     collection = get_collection()
 
     total = collection.count()
@@ -41,14 +98,11 @@ def retrieve_chunks(
     if total == 0:
         return []
 
-    filters = [{"user_id": user_id}]
+    where = _build_where(
+        user_id=user_id,
+        document_id=document_id,
+    )
 
-    if document_id is not None:
-        filters.append({"document_id": document_id})
-
-    where = filters[0] if len(filters) == 1 else {"$and": filters}
-
-    # Find how many vectors belong to this filter.
     matching = collection.get(
         where=where,
         include=[],
@@ -77,7 +131,8 @@ def retrieve_chunks(
     distances = results.get("distances", [[]])[0] or []
     ids = results.get("ids", [[]])[0] or []
 
-    output = []
+    output: list[dict] = []
+    seen_content: set[str] = set()
 
     for vector_id, content, metadata, distance in zip(
         ids,
@@ -86,12 +141,30 @@ def retrieve_chunks(
         distances,
         strict=True,
     ):
+        numeric_distance = float(distance)
+
+        if numeric_distance > max_distance:
+            continue
+
+        clean_content = str(content or "").strip()
+
+        if not clean_content:
+            continue
+
+        # Avoid returning the same passage multiple times.
+        content_key = clean_content.casefold()
+
+        if content_key in seen_content:
+            continue
+
+        seen_content.add(content_key)
+
         output.append(
             {
                 "vector_id": vector_id,
-                "content": content,
-                "metadata": metadata,
-                "distance": float(distance),
+                "content": clean_content,
+                "metadata": metadata or {},
+                "distance": numeric_distance,
             }
         )
 
