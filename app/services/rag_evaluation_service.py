@@ -100,14 +100,39 @@ def evaluate_rag_context(
     results: list[dict[str, Any]],
     context: str,
     max_distance: float,
+    grounding_distance: float | None = None,
 ) -> dict[str, Any]:
     """
     Evaluate both retrieved results and the final RAG context.
+
+    Retrieval distance determines whether the chunks are worth
+    considering. A separate grounding distance determines whether
+    the strongest retrieved evidence is strong enough for grounded
+    answer generation.
+
+    This evaluation is query-agnostic and does not depend on any
+    specific question type.
     """
 
     if not isinstance(context, str):
         raise ValueError(
             "context must be a string."
+        )
+
+    if grounding_distance is None:
+        grounding_distance = max_distance
+
+    if not isinstance(
+        grounding_distance,
+        (int, float),
+    ):
+        raise ValueError(
+            "grounding_distance must be a number."
+        )
+
+    if grounding_distance < 0:
+        raise ValueError(
+            "grounding_distance must be non-negative."
         )
 
     evaluation = evaluate_retrieval_results(
@@ -124,9 +149,16 @@ def evaluate_rag_context(
         }
     )
 
-    if not results or not context.strip():
-        evaluation["grounding_ready"] = False
-    else:
-        evaluation["grounding_ready"] = True
+    best_distance = evaluation.get("best_distance")
+
+    grounding_ready = (
+        bool(results)
+        and bool(context.strip())
+        and isinstance(best_distance, (int, float))
+        and best_distance <= grounding_distance
+    )
+
+    evaluation["grounding_distance"] = grounding_distance
+    evaluation["grounding_ready"] = grounding_ready
 
     return evaluation

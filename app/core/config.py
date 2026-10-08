@@ -47,6 +47,20 @@ OLLAMA_MODEL = os.getenv(
 )
 
 
+RAG_GROUNDING_DISTANCE = float(
+    os.getenv(
+        "MEMORYNEST_RAG_GROUNDING_DISTANCE",
+        "0.65",
+    )
+)
+
+
+if RAG_GROUNDING_DISTANCE < 0:
+    raise ValueError(
+        "MEMORYNEST_RAG_GROUNDING_DISTANCE cannot be negative."
+    )
+
+
 # Make sure required directories exist
 UPLOAD_DIRECTORY.mkdir(parents=True, exist_ok=True)
 PROCESSED_DIRECTORY.mkdir(parents=True, exist_ok=True)

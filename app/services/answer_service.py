@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import os
@@ -7,8 +6,12 @@ from typing import Any
 import requests
 from dotenv import load_dotenv
 
+from app.core.config import RAG_GROUNDING_DISTANCE
 from app.services.prompt_service import build_chat_prompt
+from app.services.rag_evaluation_service import evaluate_rag_context
 from app.services.rag_service import get_rag_context
+from app.services.retrieval_service import get_max_distance
+
 
 load_dotenv()
 
@@ -313,6 +316,32 @@ def answer_query(
         }
 
     # ---------------------------------------------------------
+    # Evaluate grounding quality before generation
+    # ---------------------------------------------------------
+
+    rag_evaluation = evaluate_rag_context(
+        results=results,
+        context=context,
+        max_distance=get_max_distance(),
+        grounding_distance=RAG_GROUNDING_DISTANCE,
+    )
+
+    if not rag_evaluation["grounding_ready"]:
+        return {
+            "answer": (
+                "I couldn't find enough information in your documents."
+            ),
+            "mode": "fallback",
+            "sources": [],
+            "results": results,
+            "context": context,
+            "document_id": result_document_id,
+            "top_k": result_top_k,
+            "ollama_available": True,
+            "rag_evaluation": rag_evaluation,
+        }
+
+    # ---------------------------------------------------------
     # Build Ollama prompts
     # ---------------------------------------------------------
 
@@ -340,6 +369,7 @@ def answer_query(
             "document_id": result_document_id,
             "top_k": result_top_k,
             "ollama_available": True,
+            "rag_evaluation": rag_evaluation,
         }
 
     except Exception as exc:
@@ -355,5 +385,6 @@ def answer_query(
             "document_id": result_document_id,
             "top_k": result_top_k,
             "ollama_available": True,
+            "rag_evaluation": rag_evaluation,
             "error": str(exc),
         }

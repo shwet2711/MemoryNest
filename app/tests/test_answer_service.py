@@ -170,3 +170,98 @@ def test_answer_query_without_context_uses_fallback():
     assert result["mode"] == "fallback"
     assert result["sources"] == []
     assert result["results"] == []
+
+def test_answer_query_blocks_weak_context_before_ollama():
+    fake_rag = {
+        "query": "Tell me something specific.",
+        "results": [
+            {
+                "content": "Only loosely related information.",
+                "metadata": {
+                    "source_filename": "MindSync.docx",
+                    "chunk_index": 0,
+                },
+                "distance": 0.6568,
+            }
+        ],
+        "context": (
+            "[Source 1]\n"
+            "File: MindSync.docx\n"
+            "Chunk: 0\n"
+            "Content:\n"
+            "Only loosely related information."
+        ),
+        "has_context": True,
+    }
+
+    with patch(
+        "app.services.answer_service.get_rag_context",
+        return_value=fake_rag,
+    ), patch(
+        "app.services.answer_service.is_ollama_available",
+        return_value=True,
+    ), patch(
+        "app.services.answer_service.generate_with_ollama",
+    ) as generate:
+
+        result = answer_query(
+            user_id=1,
+            query="Tell me something specific.",
+            use_ollama=True,
+        )
+
+    assert result["answer"] == (
+        "I couldn't find enough information in your documents."
+    )
+    assert result["mode"] == "fallback"
+    assert result["sources"] == []
+    assert result["rag_evaluation"]["grounding_ready"] is False
+    generate.assert_not_called()
+
+
+def test_answer_query_allows_strong_context_to_ollama():
+    fake_rag = {
+        "query": "What is MindSync?",
+        "results": [
+            {
+                "content": "MindSync is a memory management system.",
+                "metadata": {
+                    "source_filename": "MindSync.docx",
+                    "chunk_index": 0,
+                },
+                "distance": 0.30,
+            }
+        ],
+        "context": (
+            "[Source 1]\n"
+            "File: MindSync.docx\n"
+            "Chunk: 0\n"
+            "Content:\n"
+            "MindSync is a memory management system."
+        ),
+        "has_context": True,
+    }
+
+    with patch(
+        "app.services.answer_service.get_rag_context",
+        return_value=fake_rag,
+    ), patch(
+        "app.services.answer_service.is_ollama_available",
+        return_value=True,
+    ), patch(
+        "app.services.answer_service.generate_with_ollama",
+        return_value="MindSync is a memory management system.",
+    ) as generate:
+
+        result = answer_query(
+            user_id=1,
+            query="What is MindSync?",
+            use_ollama=True,
+        )
+
+    assert result["mode"] == "ollama"
+    assert result["answer"] == (
+        "MindSync is a memory management system."
+    )
+    assert result["rag_evaluation"]["grounding_ready"] is True
+    generate.assert_called_once()

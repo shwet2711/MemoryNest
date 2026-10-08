@@ -1,3 +1,4 @@
+
 import pytest
 
 from app.services.rag_evaluation_service import (
@@ -156,3 +157,100 @@ def test_evaluate_empty_context():
     assert result["context_available"] is False
     assert result["context_length"] == 0
     assert result["grounding_ready"] is False
+
+
+def test_grounding_not_ready_for_weak_context():
+    results = [
+        {
+            "content": "Abstract and introduction content.",
+            "metadata": {
+                "source_filename": "MindSync.docx",
+            },
+            "distance": 0.6568,
+        }
+    ]
+
+    result = evaluate_rag_context(
+        results=results,
+        context=(
+            "File: MindSync.docx\n"
+            "Content:\n"
+            "Abstract and introduction content."
+        ),
+        max_distance=0.70,
+        grounding_distance=0.65,
+    )
+
+    assert result["context_available"] is True
+    assert result["best_distance"] == pytest.approx(0.6568)
+    assert result["grounding_distance"] == 0.65
+    assert result["grounding_ready"] is False
+
+
+def test_grounding_ready_for_strong_context():
+    results = [
+        {
+            "content": "The image shows a course progress report.",
+            "metadata": {
+                "source_filename": "Screenshot.png",
+            },
+            "distance": 0.5984,
+        }
+    ]
+
+    result = evaluate_rag_context(
+        results=results,
+        context=(
+            "File: Screenshot.png\n"
+            "Content:\n"
+            "The image shows a course progress report."
+        ),
+        max_distance=0.70,
+        grounding_distance=0.65,
+    )
+
+    assert result["context_available"] is True
+    assert result["grounding_distance"] == 0.65
+    assert result["grounding_ready"] is True
+
+
+def test_grounding_requires_context():
+    results = [
+        {
+            "content": "Some content.",
+            "metadata": {
+                "source_filename": "notes.txt",
+            },
+            "distance": 0.20,
+        }
+    ]
+
+    result = evaluate_rag_context(
+        results=results,
+        context="",
+        max_distance=0.70,
+        grounding_distance=0.65,
+    )
+
+    assert result["grounding_ready"] is False
+
+
+def test_grounding_threshold_is_query_agnostic():
+    results = [
+        {
+            "content": "Some retrieved information.",
+            "metadata": {
+                "source_filename": "notes.txt",
+            },
+            "distance": 0.60,
+        }
+    ]
+
+    result = evaluate_rag_context(
+        results=results,
+        context="Some retrieved information.",
+        max_distance=0.70,
+        grounding_distance=0.65,
+    )
+
+    assert result["grounding_ready"] is True
