@@ -1,3 +1,4 @@
+
 import os
 from pathlib import Path
 
@@ -54,14 +55,62 @@ RAG_GROUNDING_DISTANCE = float(
     )
 )
 
-
 if RAG_GROUNDING_DISTANCE < 0:
     raise ValueError(
         "MEMORYNEST_RAG_GROUNDING_DISTANCE cannot be negative."
     )
 
 
-# Make sure required directories exist
+# Optional Neo4j knowledge graph configuration.
+NEO4J_ENABLED = os.getenv(
+    "NEO4J_ENABLED",
+    "False",
+).strip().lower() in {"true", "1", "yes", "on"}
+
+NEO4J_URI = os.getenv(
+    "NEO4J_URI",
+    "bolt://localhost:7687",
+).strip()
+
+NEO4J_USERNAME = os.getenv(
+    "NEO4J_USERNAME",
+    "neo4j",
+).strip()
+
+NEO4J_PASSWORD = os.getenv(
+    "NEO4J_PASSWORD",
+    "",
+)
+
+NEO4J_DATABASE = os.getenv(
+    "NEO4J_DATABASE",
+    "neo4j",
+).strip()
+
+
+if NEO4J_ENABLED:
+    if not NEO4J_URI:
+        raise ValueError(
+            "NEO4J_URI is required when Neo4j is enabled."
+        )
+
+    if not NEO4J_USERNAME:
+        raise ValueError(
+            "NEO4J_USERNAME is required when Neo4j is enabled."
+        )
+
+    if not NEO4J_PASSWORD:
+        raise ValueError(
+            "NEO4J_PASSWORD is required when Neo4j is enabled."
+        )
+
+    if not NEO4J_DATABASE:
+        raise ValueError(
+            "NEO4J_DATABASE is required when Neo4j is enabled."
+        )
+
+
+# Make sure required local directories exist.
 UPLOAD_DIRECTORY.mkdir(parents=True, exist_ok=True)
 PROCESSED_DIRECTORY.mkdir(parents=True, exist_ok=True)
 CHROMA_PERSIST_DIRECTORY.mkdir(parents=True, exist_ok=True)
