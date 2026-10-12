@@ -236,7 +236,8 @@ def test_find_relationships_returns_records(mock_driver):
     assert "(s:Entity {user_id: $user_id})" in query
     assert "(o:Entity {user_id: $user_id})" in query
     assert parameters["user_id"] == 1
-    assert parameters["entity_name"] == "MemoryNest"
+    assert parameters["normalized_entity_name"] == "memorynest"
+    assert parameters["limit"] == 10
 
 
 def test_find_relationships_validates_limit():

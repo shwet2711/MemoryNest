@@ -1,10 +1,9 @@
-
 from __future__ import annotations
 
 from typing import Any
 
-from neo4j import GraphDatabase
 from neo4j import Driver
+from neo4j import GraphDatabase
 
 from app.core.config import (
     NEO4J_DATABASE,
@@ -87,7 +86,9 @@ def check_neo4j_connection() -> dict[str, Any]:
         return {
             "enabled": True,
             "available": False,
-            "message": "Neo4j is unavailable. Check its service and configuration.",
+            "message": (
+                "Neo4j is unavailable. Check its service and configuration."
+            ),
         }
 
 
@@ -128,17 +129,21 @@ def store_entity_relationship(
     object_type = _require_text(object_type, "object_type")
     source_filename = _require_text(source_filename, "source_filename")
 
+    # Normalize entity names in Python before executing Cypher.
+    subject_normalized = subject.lower()
+    object_normalized = object_name.lower()
+
     query = """
     MERGE (s:Entity {
         user_id: $user_id,
-        normalized_name: toLower($subject),
+        normalized_name: $subject_normalized,
         entity_type: $subject_type
     })
     ON CREATE SET s.name = $subject
 
     MERGE (o:Entity {
         user_id: $user_id,
-        normalized_name: toLower($object_name),
+        normalized_name: $object_normalized,
         entity_type: $object_type
     })
     ON CREATE SET o.name = $object_name
@@ -168,9 +173,11 @@ def store_entity_relationship(
         "document_id": document_id,
         "chunk_index": chunk_index,
         "subject": subject,
+        "subject_normalized": subject_normalized,
         "subject_type": subject_type,
         "relationship": relationship,
         "object_name": object_name,
+        "object_normalized": object_normalized,
         "object_type": object_type,
         "source_filename": source_filename,
     }
@@ -197,14 +204,17 @@ def find_entity_relationships(
     """Find relationships connected to an entity owned by a user."""
     user_id = _require_positive_integer(user_id, "user_id")
     entity_name = _require_text(entity_name, "entity_name")
+    normalized_entity_name = entity_name.lower()
 
     if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
         raise ValueError("limit must be a positive integer.")
 
     query = """
-    MATCH (s:Entity {user_id: $user_id})-[r:RELATED_TO {user_id: $user_id}]->(o:Entity {user_id: $user_id})
-    WHERE s.normalized_name = toLower($entity_name)
-       OR o.normalized_name = toLower($entity_name)
+    MATCH (s:Entity {user_id: $user_id})
+          -[r:RELATED_TO {user_id: $user_id}]->
+          (o:Entity {user_id: $user_id})
+    WHERE s.normalized_name = $normalized_entity_name
+       OR o.normalized_name = $normalized_entity_name
 
     RETURN
         s.name AS subject,
@@ -226,7 +236,7 @@ def find_entity_relationships(
         records = session.run(
             query,
             user_id=user_id,
-            entity_name=entity_name,
+            normalized_entity_name=normalized_entity_name,
             limit=limit,
         )
 
