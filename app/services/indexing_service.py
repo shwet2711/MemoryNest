@@ -1,8 +1,11 @@
 
 from __future__ import annotations
 
+import logging
+
 from sqlalchemy.orm import Session
 
+from app.core.config import NEO4J_ENABLED
 from app.db.chunk_model import DocumentChunk
 from app.db.embedding_model import ChunkEmbedding
 
@@ -17,6 +20,14 @@ from app.services.vector_store import (
     delete_embedding,
 )
 
+from app.services.knowledge_graph_pipeline_service import (
+    process_chunk_for_knowledge_graph,
+)
+from app.services.knowledge_graph_service import check_neo4j_connection
+
+
+logger = logging.getLogger(__name__)
+
 
 def index_document(
     db: Session,
@@ -25,19 +36,33 @@ def index_document(
     batch_size: int = 32,
 ) -> dict:
     """
-    Index every chunk of a document.
+    Index document chunks in ChromaDB and synchronize SQLite metadata.
 
-    ChromaDB stores the actual vectors.
-    SQLite stores their metadata and vector IDs.
-
-    Repeated indexing updates existing vector IDs.
+    When Neo4j is enabled and available, also process chunks for the
+    optional knowledge graph. Graph failures do not undo successful
+    vector indexing.
     """
 
-    if document_id < 1 or user_id < 1:
-        raise ValueError("Document ID and user ID must be positive.")
+    if (
+        isinstance(document_id, bool)
+        or not isinstance(document_id, int)
+        or document_id < 1
+    ):
+        raise ValueError("Document ID must be a positive integer.")
 
-    if batch_size < 1:
-        raise ValueError("Batch size must be at least 1.")
+    if (
+        isinstance(user_id, bool)
+        or not isinstance(user_id, int)
+        or user_id < 1
+    ):
+        raise ValueError("User ID must be a positive integer.")
+
+    if (
+        isinstance(batch_size, bool)
+        or not isinstance(batch_size, int)
+        or batch_size < 1
+    ):
+        raise ValueError("Batch size must be a positive integer.")
 
     chunks = (
         db.query(DocumentChunk)
@@ -76,16 +101,14 @@ def index_document(
 
     indexed_count = 0
 
+    # Preserve the existing vector-indexing workflow.
     for start in range(0, len(chunks), batch_size):
         batch = chunks[start:start + batch_size]
-
         texts = [chunk.content for chunk in batch]
 
         vectors = generate_embeddings(texts)
-
         vector_ids = [f"chunk_{chunk.id}" for chunk in batch]
 
-        # Store/update vectors first.
         add_embeddings(
             vector_ids=vector_ids,
             embeddings=vectors,
@@ -99,7 +122,6 @@ def index_document(
             contents=texts,
         )
 
-        # Synchronize SQLite metadata.
         for chunk, vector_id in zip(
             batch,
             vector_ids,
@@ -126,10 +148,9 @@ def index_document(
                 record.vector_id = vector_id
 
         db.commit()
-
         indexed_count += len(batch)
 
-    # Remove metadata for chunks that no longer exist.
+    # Remove stale vector metadata for chunks that no longer exist.
     current_chunk_ids = {chunk.id for chunk in chunks}
 
     stale_records = [
@@ -147,9 +168,75 @@ def index_document(
     if stale_records:
         db.commit()
 
+    # Report graph processing separately from successful vector indexing.
+    graph_result = {
+        "knowledge_graph_status": "disabled",
+        "knowledge_graph_processed_chunks": 0,
+        "knowledge_graph_failed_chunks": 0,
+        "knowledge_graph_relationships_stored": 0,
+    }
+
+    if NEO4J_ENABLED:
+        try:
+            connection = check_neo4j_connection()
+        except Exception:
+            logger.exception("Neo4j connection check failed.")
+            connection = {"available": False}
+
+        if not connection.get("available", False):
+            logger.warning(
+                "Knowledge graph skipped for document %s: "
+                "Neo4j is unavailable.",
+                document_id,
+            )
+            graph_result["knowledge_graph_status"] = "unavailable"
+        else:
+            processed_count = 0
+            failed_count = 0
+            relationship_count = 0
+
+            for chunk in chunks:
+                try:
+                    result = process_chunk_for_knowledge_graph(
+                        user_id=user_id,
+                        document_id=document_id,
+                        chunk_index=chunk.chunk_index,
+                        text=chunk.content,
+                        source_filename=chunk.source_filename,
+                    )
+
+                    processed_count += 1
+                    relationship_count += result["stored_count"]
+
+                except Exception:
+                    failed_count += 1
+                    logger.exception(
+                        "Knowledge graph processing failed for "
+                        "document %s, chunk %s.",
+                        document_id,
+                        chunk.chunk_index,
+                    )
+
+            if failed_count == 0:
+                graph_status = "completed"
+            elif processed_count == 0:
+                graph_status = "failed"
+            else:
+                graph_status = "partial_failure"
+
+            graph_result = {
+                "knowledge_graph_status": graph_status,
+                "knowledge_graph_processed_chunks": processed_count,
+                "knowledge_graph_failed_chunks": failed_count,
+                "knowledge_graph_relationships_stored": (
+                    relationship_count
+                ),
+            }
+
     return {
         "document_id": document_id,
         "total_chunks": len(chunks),
         "indexed": indexed_count,
         "status": "completed",
+        **graph_result,
     }
