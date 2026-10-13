@@ -193,3 +193,98 @@ def test_extraction_input_is_bounded(monkeypatch):
     assert len(captured["prompt"]) < (
         extraction.MAX_INPUT_CHARACTERS + 2_000
     )
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        {
+            "subject": "Python",
+            "subject_type": "technology",
+            "relationship": "Programming Language",
+            "object": "Programming Language",
+            "object_type": "concept",
+        },
+        {
+            "subject": "Linux",
+            "subject_type": "technology",
+            "relationship": "OS",
+            "object": "OS",
+            "object_type": "concept",
+        },
+        {
+            "subject": "MemoryNest",
+            "subject_type": "project",
+            "relationship": "uses",
+            "object": " memorynest ",
+            "object_type": "project",
+        },
+    ],
+)
+def test_redundant_relationships_are_rejected(item):
+    result = extraction._validate_relationships(
+        {"relationships": [item]}
+    )
+
+    assert result == []
+
+
+def test_meaningful_relationship_is_preserved():
+    result = extraction._validate_relationships(
+        {
+            "relationships": [
+                {
+                    "subject": "MemoryNest",
+                    "subject_type": "project",
+                    "relationship": "uses",
+                    "object": "SQLite",
+                    "object_type": "technology",
+                }
+            ]
+        }
+    )
+
+    assert len(result) == 1
+    assert result[0]["subject"] == "MemoryNest"
+    assert result[0]["object"] == "SQLite"
+
+
+def test_duplicate_relationships_ignore_case_and_spacing():
+    result = extraction._validate_relationships(
+        {
+            "relationships": [
+                {
+                    "subject": "MemoryNest",
+                    "subject_type": "project",
+                    "relationship": "uses",
+                    "object": "Python",
+                    "object_type": "technology",
+                },
+                {
+                    "subject": " memorynest ",
+                    "subject_type": "project",
+                    "relationship": "USES",
+                    "object": "python",
+                    "object_type": "technology",
+                },
+            ]
+        }
+    )
+
+    assert len(result) == 1
+
+
+def test_prompt_contains_entity_type_and_grounding_rules(monkeypatch):
+    captured = {}
+
+    def fake_post(url, **kwargs):
+        captured["prompt"] = kwargs["json"]["prompt"]
+        return fake_ollama_response({"relationships": []})
+
+    monkeypatch.setattr(extraction.requests, "post", fake_post)
+
+    extraction.extract_relationships("MemoryNest uses Python.")
+
+    prompt = captured["prompt"].lower()
+    assert "explicitly supported" in prompt
+    assert "do not label a technology or software component as an organization" in prompt
+    assert "category label as both relationship and object" in prompt
