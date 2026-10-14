@@ -54,6 +54,11 @@ def get_driver() -> Driver:
     return _driver
 
 
+def _normalize_entity_name(value: str) -> str:
+    """Normalize entity names for case-insensitive matching."""
+    return " ".join(value.casefold().split())
+
+
 def close_driver() -> None:
     """Close the shared Neo4j driver, if one exists."""
     global _driver
@@ -130,8 +135,8 @@ def store_entity_relationship(
     source_filename = _require_text(source_filename, "source_filename")
 
     # Normalize entity names in Python before executing Cypher.
-    subject_normalized = subject.lower()
-    object_normalized = object_name.lower()
+    subject_normalized = _normalize_entity_name(subject)
+    object_normalized = _normalize_entity_name(object_name)
 
     query = """
     MERGE (s:Entity {
@@ -204,7 +209,7 @@ def find_entity_relationships(
     """Find relationships connected to an entity owned by a user."""
     user_id = _require_positive_integer(user_id, "user_id")
     entity_name = _require_text(entity_name, "entity_name")
-    normalized_entity_name = entity_name.lower()
+    normalized_entity_name = _normalize_entity_name(entity_name)
 
     if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
         raise ValueError("limit must be a positive integer.")

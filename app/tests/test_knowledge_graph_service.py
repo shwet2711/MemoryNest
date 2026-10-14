@@ -255,3 +255,51 @@ def test_find_relationships_rejects_empty_entity_name():
             user_id=1,
             entity_name=" ",
         )
+
+
+
+def test_normalize_entity_name_ignores_case_and_extra_whitespace():
+    assert graph._normalize_entity_name(
+        "  Machine   Learning  "
+    ) == "machine learning"
+
+
+def test_store_relationship_normalizes_entity_names(mock_driver):
+    _, session = mock_driver
+    session.run.return_value.single.return_value = {
+        "subject": "Machine Learning",
+        "object": "Python",
+    }
+
+    graph.store_entity_relationship(
+        user_id=1,
+        document_id=1,
+        chunk_index=0,
+        subject=" Machine   Learning ",
+        subject_type="concept",
+        relationship="uses",
+        object_name=" PYTHON ",
+        object_type="technology",
+        source_filename="notes.txt",
+    )
+
+    parameters = session.run.call_args.args[1]
+
+    assert parameters["subject_normalized"] == "machine learning"
+    assert parameters["object_normalized"] == "python"
+    assert parameters["subject"] == "Machine   Learning"
+    assert parameters["object_name"] == "PYTHON"
+
+
+def test_find_relationships_normalizes_search_name(mock_driver):
+    _, session = mock_driver
+    session.run.return_value = []
+
+    graph.find_entity_relationships(
+        user_id=1,
+        entity_name="  Machine   Learning  ",
+    )
+
+    parameters = session.run.call_args.kwargs
+
+    assert parameters["normalized_entity_name"] == "machine learning"
