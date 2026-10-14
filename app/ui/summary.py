@@ -23,6 +23,12 @@ def _initialize_summary_state() -> None:
         st.session_state.summary_audio_document_id = None
 
 
+def _clear_document_specific_state() -> None:
+    """Clear the summary and audio associated with the previous document."""
+    st.session_state["summary_result"] = None
+    st.session_state["summary_audio"] = None
+    st.session_state["summary_audio_document_id"] = None
+
 def _render_header() -> None:
     st.title("Document Summary")
 
@@ -469,11 +475,7 @@ def summary_page() -> None:
             result.get("document_id")
             != selected_document_id
         ):
-            st.session_state.summary_result = None
-            st.session_state.summary_audio = None
-            st.session_state.summary_audio_document_id = (
-                None
-            )
+            _clear_document_specific_state()
 
         else:
             _render_summary_result(
