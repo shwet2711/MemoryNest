@@ -303,6 +303,64 @@ def store_entity_relationships(
         return session.execute_write(_store_batch_in_transaction)
 
 
+
+def delete_document_relationships(
+    *,
+    user_id: int,
+    document_id: int,
+) -> dict[str, int]:
+    """Delete a user's document relationships and orphaned endpoint entities."""
+    user_id = _require_positive_integer(user_id, "user_id")
+    document_id = _require_positive_integer(
+        document_id,
+        "document_id",
+    )
+
+    query = """
+    MATCH (s:Entity {user_id: $user_id})
+          -[r:RELATED_TO {
+              user_id: $user_id,
+              document_id: $document_id
+          }]->
+          (o:Entity {user_id: $user_id})
+
+    WITH
+        collect(DISTINCT s) + collect(DISTINCT o) AS endpoints,
+        collect(DISTINCT r) AS relationships
+
+    FOREACH (relationship IN relationships |
+        DELETE relationship
+    )
+
+    WITH endpoints
+    UNWIND endpoints AS entity
+    WITH DISTINCT entity
+    WHERE NOT (entity)--()
+    DELETE entity
+    """
+
+    driver = get_driver()
+
+    with driver.session(database=NEO4J_DATABASE) as session:
+        def _delete_in_transaction(tx: Any) -> dict[str, int]:
+            result = tx.run(
+                query,
+                user_id=user_id,
+                document_id=document_id,
+            )
+            summary = result.consume()
+            counters = summary.counters
+
+            return {
+                "deleted_relationships": (
+                    counters.relationships_deleted
+                ),
+                "deleted_entities": counters.nodes_deleted,
+            }
+
+        return session.execute_write(_delete_in_transaction)
+
+
 def find_entity_relationships(
     *,
     user_id: int,

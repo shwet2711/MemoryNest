@@ -15,8 +15,15 @@ from app.db.chunk_model import DocumentChunk
 from app.db.document_model import Document
 from app.services.ocr_service import extract_image_text
 from app.services.pdf_service import extract_pdf_with_ocr
+import logging
 
+from app.core.config import NEO4J_ENABLED
+from app.services.knowledge_graph_service import (
+    delete_document_relationships,
+)
+from app.services.vector_store import delete_document_embeddings
 
+logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(
     __file__
 ).resolve().parents[2]
@@ -466,11 +473,13 @@ def get_document(
     )
 
 
+
 def delete_document(
     db: Session,
     user_id: int,
     document_id: int,
 ) -> bool:
+    """Delete a user's document and attempt related data cleanup."""
 
     document = get_document(
         db,
@@ -481,14 +490,12 @@ def delete_document(
     if document is None:
         return False
 
-    # Delete chunks.
+    # Delete document chunks from the relational database.
     chunks = (
         db.query(DocumentChunk)
         .filter(
-            DocumentChunk.document_id
-            == document_id,
-            DocumentChunk.user_id
-            == user_id,
+            DocumentChunk.document_id == document_id,
+            DocumentChunk.user_id == user_id,
         )
         .all()
     )
@@ -496,36 +503,59 @@ def delete_document(
     for chunk in chunks:
         db.delete(chunk)
 
-    # Delete uploaded file.
-    file_path = Path(
-        document.file_path
-    )
-
-    if file_path.exists():
-        file_path.unlink()
-
-    # Delete extracted text.
-    if document.extracted_text_path:
-
-        text_path = Path(
-            document.extracted_text_path
-        )
-
-        if text_path.exists():
-            text_path.unlink()
-
-    # Delete chunk preview file.
-    chunk_output_path = (
-        CHUNK_OUTPUT_DIR
-        / f"document_{document.id}_chunks.txt"
-    )
-
-    if chunk_output_path.exists():
-        chunk_output_path.unlink()
-
-    # Delete database record.
     db.delete(document)
 
+    # Commit database changes before removing local files.
     db.commit()
+
+    # Remove embeddings belonging to this user and document.
+    try:
+        delete_document_embeddings(
+            document_id=document_id,
+            user_id=user_id,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to delete embeddings for document %s, user %s",
+            document_id,
+            user_id,
+        )
+
+    # Neo4j is optional; don't connect when it is disabled.
+    if NEO4J_ENABLED:
+        try:
+            delete_document_relationships(
+                user_id=user_id,
+                document_id=document_id,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to delete graph relationships for "
+                "document %s, user %s",
+                document_id,
+                user_id,
+            )
+
+    # Remove local files only after the database commit.
+    paths_to_remove = [
+        Path(document.file_path),
+        CHUNK_OUTPUT_DIR / f"document_{document.id}_chunks.txt",
+    ]
+
+    if document.extracted_text_path:
+        paths_to_remove.append(
+            Path(document.extracted_text_path)
+        )
+
+    for path in paths_to_remove:
+        try:
+            if path.exists():
+                path.unlink()
+        except OSError:
+            logger.exception(
+                "Failed to remove file %s for deleted document %s",
+                path,
+                document_id,
+            )
 
     return True

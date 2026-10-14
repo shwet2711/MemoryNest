@@ -393,3 +393,70 @@ def test_store_relationships_validates_entire_batch_before_writing(
         )
 
     driver.session.assert_not_called()
+
+
+
+def test_delete_document_relationships_uses_user_and_document_scope(
+    mock_driver,
+):
+    _, session = mock_driver
+
+    counters = MagicMock()
+    counters.relationships_deleted = 2
+    counters.nodes_deleted = 1
+
+    summary = MagicMock()
+    summary.counters = counters
+
+    session.run.return_value.consume.return_value = summary
+
+    result = graph.delete_document_relationships(
+        user_id=1,
+        document_id=6,
+    )
+
+    assert result == {
+        "deleted_relationships": 2,
+        "deleted_entities": 1,
+    }
+
+    query = session.run.call_args.args[0]
+    parameters = session.run.call_args.kwargs
+
+    assert "document_id: $document_id" in query
+    assert "user_id: $user_id" in query
+    assert "WHERE NOT (entity)--()" in query
+    assert parameters == {
+        "user_id": 1,
+        "document_id": 6,
+    }
+
+    session.execute_write.assert_called_once()
+
+
+def test_delete_document_relationships_validates_ids():
+    with pytest.raises(ValueError, match="user_id"):
+        graph.delete_document_relationships(
+            user_id=0,
+            document_id=1,
+        )
+
+    with pytest.raises(ValueError, match="document_id"):
+        graph.delete_document_relationships(
+            user_id=1,
+            document_id=0,
+        )
+
+
+def test_delete_document_relationships_rejects_boolean_ids():
+    with pytest.raises(ValueError, match="user_id"):
+        graph.delete_document_relationships(
+            user_id=True,
+            document_id=1,
+        )
+
+    with pytest.raises(ValueError, match="document_id"):
+        graph.delete_document_relationships(
+            user_id=1,
+            document_id=True,
+        )
