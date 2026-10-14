@@ -1,10 +1,9 @@
-
 from __future__ import annotations
 
 from typing import Any
 
 from app.services.entity_extraction_service import extract_relationships
-from app.services.knowledge_graph_service import store_entity_relationship
+from app.services.knowledge_graph_service import store_entity_relationships
 
 
 def _validate_positive_integer(value: int, field_name: str) -> int:
@@ -21,7 +20,7 @@ def process_chunk_for_knowledge_graph(
     text: str,
     source_filename: str,
 ) -> dict[str, Any]:
-    """Extract relationships from one chunk and store them in Neo4j."""
+    """Extract relationships from one chunk and store them atomically."""
 
     user_id = _validate_positive_integer(user_id, "user_id")
     document_id = _validate_positive_integer(document_id, "document_id")
@@ -39,24 +38,20 @@ def process_chunk_for_knowledge_graph(
 
     source_filename = source_filename.strip()
 
-    # Extraction happens first. No graph writes occur if extraction fails.
+    # Extract first. If extraction fails, no graph writes occur.
     relationships = extract_relationships(text)
 
-    stored: list[dict[str, Any]] = []
-
-    for relationship in relationships:
-        record = store_entity_relationship(
+    # Store all relationships from this chunk in one Neo4j transaction.
+    if relationships:
+        stored = store_entity_relationships(
+            relationships=relationships,
             user_id=user_id,
             document_id=document_id,
             chunk_index=chunk_index,
-            subject=relationship["subject"],
-            subject_type=relationship["subject_type"],
-            relationship=relationship["relationship"],
-            object_name=relationship["object"],
-            object_type=relationship["object_type"],
             source_filename=source_filename,
         )
-        stored.append(record)
+    else:
+        stored = []
 
     return {
         "user_id": user_id,

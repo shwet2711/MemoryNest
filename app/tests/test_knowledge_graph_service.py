@@ -13,6 +13,13 @@ def mock_driver():
     session = MagicMock()
     driver.session.return_value.__enter__.return_value = session
 
+    def execute_write_side_effect(callback, *args, **kwargs):
+        tx = MagicMock()
+        tx.run = session.run
+        return callback(tx, *args, **kwargs)
+
+    session.execute_write.side_effect = execute_write_side_effect
+
     graph._driver = driver
 
     with patch.object(graph, "NEO4J_ENABLED", True):
@@ -303,3 +310,86 @@ def test_find_relationships_normalizes_search_name(mock_driver):
     parameters = session.run.call_args.kwargs
 
     assert parameters["normalized_entity_name"] == "machine learning"
+
+
+def test_store_relationships_writes_batch_in_one_transaction(mock_driver):
+    _, session = mock_driver
+
+    first_record = {
+        "subject": "MemoryNest",
+        "object": "Python",
+        "relationship": "uses",
+    }
+    second_record = {
+        "subject": "MemoryNest",
+        "object": "SQLite",
+        "relationship": "uses",
+    }
+
+    session.run.return_value.single.side_effect = [
+        first_record,
+        second_record,
+    ]
+
+    relationships = [
+        {
+            "subject": "MemoryNest",
+            "subject_type": "project",
+            "relationship": "uses",
+            "object": "Python",
+            "object_type": "technology",
+        },
+        {
+            "subject": "MemoryNest",
+            "subject_type": "project",
+            "relationship": "uses",
+            "object": "SQLite",
+            "object_type": "technology",
+        },
+    ]
+
+    result = graph.store_entity_relationships(
+        relationships=relationships,
+        user_id=1,
+        document_id=6,
+        chunk_index=2,
+        source_filename="MindNest.docx",
+    )
+
+    assert result == [first_record, second_record]
+    session.execute_write.assert_called_once()
+    assert session.run.call_count == 2
+
+
+def test_store_relationships_validates_entire_batch_before_writing(
+    mock_driver,
+):
+    driver, _ = mock_driver
+
+    relationships = [
+        {
+            "subject": "MemoryNest",
+            "subject_type": "project",
+            "relationship": "uses",
+            "object": "Python",
+            "object_type": "technology",
+        },
+        {
+            "subject": " ",
+            "subject_type": "project",
+            "relationship": "uses",
+            "object": "SQLite",
+            "object_type": "technology",
+        },
+    ]
+
+    with pytest.raises(ValueError, match="subject"):
+        graph.store_entity_relationships(
+            relationships=relationships,
+            user_id=1,
+            document_id=6,
+            chunk_index=2,
+            source_filename="MindNest.docx",
+        )
+
+    driver.session.assert_not_called()

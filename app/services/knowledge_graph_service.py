@@ -97,6 +97,58 @@ def check_neo4j_connection() -> dict[str, Any]:
         }
 
 
+_RELATIONSHIP_QUERY = """
+MERGE (s:Entity {
+    user_id: $user_id,
+    normalized_name: $subject_normalized,
+    entity_type: $subject_type
+})
+ON CREATE SET s.name = $subject
+
+MERGE (o:Entity {
+    user_id: $user_id,
+    normalized_name: $object_normalized,
+    entity_type: $object_type
+})
+ON CREATE SET o.name = $object_name
+
+MERGE (s)-[r:RELATED_TO {
+    user_id: $user_id,
+    document_id: $document_id,
+    chunk_index: $chunk_index,
+    relationship: $relationship
+}]->(o)
+
+SET r.source_filename = $source_filename
+
+RETURN
+    s.name AS subject,
+    s.entity_type AS subject_type,
+    r.relationship AS relationship,
+    o.name AS object,
+    o.entity_type AS object_type,
+    r.source_filename AS source_filename,
+    r.document_id AS document_id,
+    r.chunk_index AS chunk_index
+"""
+
+
+def _store_relationship_in_transaction(
+    tx: Any,
+    query: str,
+    parameters: dict[str, Any],
+) -> dict[str, Any]:
+    """Execute one relationship write inside an existing transaction."""
+    record = tx.run(query, parameters).single()
+
+    if record is None:
+        raise RuntimeError(
+            "Neo4j did not return the stored relationship."
+        )
+
+    return dict(record)
+
+
 def store_entity_relationship(
     *,
     user_id: int,
@@ -138,40 +190,7 @@ def store_entity_relationship(
     subject_normalized = _normalize_entity_name(subject)
     object_normalized = _normalize_entity_name(object_name)
 
-    query = """
-    MERGE (s:Entity {
-        user_id: $user_id,
-        normalized_name: $subject_normalized,
-        entity_type: $subject_type
-    })
-    ON CREATE SET s.name = $subject
-
-    MERGE (o:Entity {
-        user_id: $user_id,
-        normalized_name: $object_normalized,
-        entity_type: $object_type
-    })
-    ON CREATE SET o.name = $object_name
-
-    MERGE (s)-[r:RELATED_TO {
-        user_id: $user_id,
-        document_id: $document_id,
-        chunk_index: $chunk_index,
-        relationship: $relationship
-    }]->(o)
-
-    SET r.source_filename = $source_filename
-
-    RETURN
-        s.name AS subject,
-        s.entity_type AS subject_type,
-        r.relationship AS relationship,
-        o.name AS object,
-        o.entity_type AS object_type,
-        r.source_filename AS source_filename,
-        r.document_id AS document_id,
-        r.chunk_index AS chunk_index
-    """
+    query = _RELATIONSHIP_QUERY
 
     parameters = {
         "user_id": user_id,
@@ -190,14 +209,98 @@ def store_entity_relationship(
     driver = get_driver()
 
     with driver.session(database=NEO4J_DATABASE) as session:
-        record = session.run(query, parameters).single()
-
-    if record is None:
-        raise RuntimeError(
-            "Neo4j did not return the stored relationship."
+        return session.execute_write(
+            _store_relationship_in_transaction,
+            query,
+            parameters,
         )
 
-    return dict(record)
+
+def store_entity_relationships(
+    *,
+    relationships: list[dict[str, str]],
+    user_id: int,
+    document_id: int,
+    chunk_index: int,
+    source_filename: str,
+) -> list[dict[str, Any]]:
+    """Store all relationships for one chunk atomically."""
+    user_id = _require_positive_integer(user_id, "user_id")
+    document_id = _require_positive_integer(document_id, "document_id")
+
+    if isinstance(chunk_index, bool) or not isinstance(chunk_index, int):
+        raise ValueError("chunk_index must be an integer.")
+
+    if chunk_index < 0:
+        raise ValueError("chunk_index must be non-negative.")
+
+    source_filename = _require_text(source_filename, "source_filename")
+
+    if not isinstance(relationships, list):
+        raise ValueError("relationships must be a list.")
+
+    prepared: list[tuple[str, dict[str, Any]]] = []
+
+    # Validate every relationship before starting the transaction.
+    for item in relationships:
+        if not isinstance(item, dict):
+            raise ValueError("Each relationship must be a dictionary.")
+
+        subject = _require_text(item.get("subject"), "subject")
+        subject_type = _require_text(
+            item.get("subject_type"),
+            "subject_type",
+        )
+        relationship = _require_text(
+            item.get("relationship"),
+            "relationship",
+        )
+        object_name = _require_text(item.get("object"), "object")
+        object_type = _require_text(
+            item.get("object_type"),
+            "object_type",
+        )
+
+        subject_normalized = _normalize_entity_name(subject)
+        object_normalized = _normalize_entity_name(object_name)
+
+        query = _RELATIONSHIP_QUERY
+
+        parameters = {
+            "user_id": user_id,
+            "document_id": document_id,
+            "chunk_index": chunk_index,
+            "subject": subject,
+            "subject_normalized": subject_normalized,
+            "subject_type": subject_type,
+            "relationship": relationship,
+            "object_name": object_name,
+            "object_normalized": object_normalized,
+            "object_type": object_type,
+            "source_filename": source_filename,
+        }
+
+        prepared.append((query, parameters))
+
+    def _store_batch_in_transaction(tx: Any) -> list[dict[str, Any]]:
+        """Write every prepared relationship in one transaction."""
+        results: list[dict[str, Any]] = []
+
+        for query, parameters in prepared:
+            results.append(
+                _store_relationship_in_transaction(
+                    tx,
+                    query,
+                    parameters,
+                )
+            )
+
+        return results
+
+    driver = get_driver()
+
+    with driver.session(database=NEO4J_DATABASE) as session:
+        return session.execute_write(_store_batch_in_transaction)
 
 
 def find_entity_relationships(
