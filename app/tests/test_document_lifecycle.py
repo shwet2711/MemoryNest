@@ -1,4 +1,5 @@
 from __future__ import annotations
+from unittest.mock import MagicMock
 
 from pathlib import Path
 
@@ -329,3 +330,155 @@ def test_document_lifecycle_creates_indexes_and_cleans_up(
         )
         is False
     )
+
+def test_document_lifecycle_indexes_and_cleans_up_knowledge_graph(
+    lifecycle_setup,
+    monkeypatch,
+):
+    setup = lifecycle_setup
+    db = setup["db"]
+
+    user_id = 987654321
+    original_text = (
+        "MemoryNest connects documents with entities and relationships. "
+        "Python supports document processing and knowledge retrieval. "
+        "SQLite stores document metadata and chunk information. "
+    ) * 30
+
+    # Enable graph integration without connecting to a real Neo4j server.
+    monkeypatch.setattr(indexing_service, "NEO4J_ENABLED", True)
+    monkeypatch.setattr(document_service, "NEO4J_ENABLED", True)
+
+    monkeypatch.setattr(
+        indexing_service,
+        "check_neo4j_connection",
+        lambda: {"enabled": True, "available": True},
+    )
+
+    graph_index_mock = MagicMock(
+        side_effect=lambda **kwargs: {"stored_count": 1}
+    )
+    graph_delete_mock = MagicMock(return_value={})
+
+    monkeypatch.setattr(
+        indexing_service,
+        "process_chunk_for_knowledge_graph",
+        graph_index_mock,
+    )
+    monkeypatch.setattr(
+        document_service,
+        "delete_document_relationships",
+        graph_delete_mock,
+    )
+
+    # 1. Create a document.
+    document = document_service.create_document(
+        db=db,
+        user_id=user_id,
+        filename="graph_lifecycle_notes.txt",
+        file_bytes=original_text.encode("utf-8"),
+    )
+
+    document_id = document.id
+
+    assert document.extraction_status == "completed"
+
+    # 2. Create and persist chunks.
+    chunks = chunk_service.process_document_chunks(
+        db=db,
+        document=document,
+        user_id=user_id,
+        chunk_size=500,
+        chunk_overlap=50,
+    )
+
+    assert len(chunks) > 1
+
+    # 3. Index vectors and process every chunk for the graph.
+    result = indexing_service.index_document(
+        db=db,
+        document_id=document_id,
+        user_id=user_id,
+        batch_size=2,
+    )
+
+    assert result["status"] == "completed"
+    assert result["indexed"] == len(chunks)
+    assert result["knowledge_graph_status"] == "completed"
+    assert result["knowledge_graph_processed_chunks"] == len(chunks)
+    assert result["knowledge_graph_failed_chunks"] == 0
+    assert result["knowledge_graph_relationships_stored"] == len(chunks)
+
+    assert graph_index_mock.call_count == len(chunks)
+
+    processed_chunk_indexes = {
+        call.kwargs["chunk_index"]
+        for call in graph_index_mock.call_args_list
+    }
+
+    assert processed_chunk_indexes == {
+        chunk.chunk_index for chunk in chunks
+    }
+
+    for graph_call in graph_index_mock.call_args_list:
+        assert graph_call.kwargs["user_id"] == user_id
+        assert graph_call.kwargs["document_id"] == document_id
+        assert graph_call.kwargs["text"].strip()
+        assert graph_call.kwargs["source_filename"]
+
+    # 4. Delete the document using the real deletion service.
+    deleted = document_service.delete_document(
+        db=db,
+        user_id=user_id,
+        document_id=document_id,
+    )
+
+    assert deleted is True
+
+    # 5. Verify that graph cleanup receives the correct document scope.
+    graph_delete_mock.assert_called_once_with(
+        user_id=user_id,
+        document_id=document_id,
+    )
+
+    # 6. Verify that relational and vector data are also removed.
+    assert (
+        db.query(Document)
+        .filter(
+            Document.id == document_id,
+            Document.user_id == user_id,
+        )
+        .count()
+        == 0
+    )
+
+    assert (
+        db.query(DocumentChunk)
+        .filter(
+            DocumentChunk.document_id == document_id,
+            DocumentChunk.user_id == user_id,
+        )
+        .count()
+        == 0
+    )
+
+    assert (
+        db.query(ChunkEmbedding)
+        .filter(
+            ChunkEmbedding.document_id == document_id,
+            ChunkEmbedding.user_id == user_id,
+        )
+        .count()
+        == 0
+    )
+
+    assert setup["collection"].count() == 0
+
+    assert not Path(document.file_path).exists()
+    assert not Path(document.extracted_text_path).exists()
+
+    chunk_preview = (
+        setup["chunk_dir"]
+        / f"document_{document_id}_chunks.txt"
+    )
+    assert not chunk_preview.exists()
