@@ -1,0 +1,331 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from sqlalchemy import create_engine, func
+from sqlalchemy.orm import sessionmaker
+
+from app.db.database import Base
+from app.db.chunk_model import DocumentChunk
+from app.db.document_model import Document
+from app.db.embedding_model import ChunkEmbedding
+from app.services import (
+    chunk_service,
+    document_service,
+    indexing_service,
+    vector_store,
+)
+
+
+class InMemoryVectorCollection:
+    """Small isolated substitute for the Chroma collection."""
+
+    def __init__(self):
+        self.records = {}
+
+    def upsert(
+        self,
+        ids,
+        embeddings,
+        documents,
+        metadatas,
+    ):
+        for vector_id, embedding, content, metadata in zip(
+            ids,
+            embeddings,
+            documents,
+            metadatas,
+            strict=True,
+        ):
+            self.records[vector_id] = {
+                "embedding": embedding,
+                "document": content,
+                "metadata": metadata,
+            }
+
+    def get(self, ids=None, where=None, include=None):
+        selected_ids = list(self.records)
+
+        if ids is not None:
+            requested = set(ids)
+            selected_ids = [
+                vector_id
+                for vector_id in selected_ids
+                if vector_id in requested
+            ]
+
+        if where is not None:
+            conditions = where.get("$and", [where])
+
+            selected_ids = [
+                vector_id
+                for vector_id in selected_ids
+                if all(
+                    self.records[vector_id]["metadata"].get(key)
+                    == value
+                    for condition in conditions
+                    for key, value in condition.items()
+                )
+            ]
+
+        result = {"ids": selected_ids}
+
+        if include and "documents" in include:
+            result["documents"] = [
+                self.records[vector_id]["document"]
+                for vector_id in selected_ids
+            ]
+
+        if include and "metadatas" in include:
+            result["metadatas"] = [
+                self.records[vector_id]["metadata"]
+                for vector_id in selected_ids
+            ]
+
+        return result
+
+    def delete(self, ids):
+        for vector_id in ids:
+            self.records.pop(vector_id, None)
+
+    def count(self):
+        return len(self.records)
+
+
+@pytest.fixture
+def lifecycle_setup(tmp_path, monkeypatch):
+    """Create isolated SQL, file, vector and graph settings."""
+
+    database_path = tmp_path / "lifecycle.sqlite"
+    engine = create_engine(
+        f"sqlite:///{database_path.as_posix()}",
+        connect_args={"check_same_thread": False},
+    )
+
+    Base.metadata.create_all(engine)
+
+    test_session_factory = sessionmaker(
+        bind=engine,
+        autoflush=False,
+        expire_on_commit=False,
+    )
+    db = test_session_factory()
+
+    upload_dir = tmp_path / "uploads"
+    extracted_dir = tmp_path / "extracted"
+    chunk_dir = tmp_path / "chunks"
+
+    for directory in (upload_dir, extracted_dir, chunk_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(
+        document_service, "UPLOAD_DIR", upload_dir
+    )
+    monkeypatch.setattr(
+        document_service, "EXTRACTED_DIR", extracted_dir
+    )
+    monkeypatch.setattr(
+        document_service, "CHUNK_OUTPUT_DIR", chunk_dir
+    )
+    monkeypatch.setattr(
+        chunk_service, "CHUNK_OUTPUT_DIR", chunk_dir
+    )
+
+    collection = InMemoryVectorCollection()
+    monkeypatch.setattr(
+        vector_store, "get_collection", lambda: collection
+    )
+
+    monkeypatch.setattr(
+        indexing_service,
+        "get_embedding_model_name",
+        lambda: "test-embedding-model",
+    )
+    monkeypatch.setattr(
+        indexing_service,
+        "get_embedding_dimension",
+        lambda: 3,
+    )
+    monkeypatch.setattr(
+        indexing_service,
+        "generate_embeddings",
+        lambda texts: [
+            [0.1, 0.2, 0.3] for _ in texts
+        ],
+    )
+
+    # This lifecycle test does not connect to a real Neo4j database.
+    monkeypatch.setattr(
+        indexing_service, "NEO4J_ENABLED", False
+    )
+    monkeypatch.setattr(
+        document_service, "NEO4J_ENABLED", False
+    )
+
+    yield {
+        "db": db,
+        "engine": engine,
+        "collection": collection,
+        "upload_dir": upload_dir,
+        "extracted_dir": extracted_dir,
+        "chunk_dir": chunk_dir,
+    }
+
+    db.close()
+    Base.metadata.drop_all(engine)
+    engine.dispose()
+
+
+def test_document_lifecycle_creates_indexes_and_cleans_up(
+    lifecycle_setup,
+):
+    setup = lifecycle_setup
+    db = setup["db"]
+
+    original_text = (
+        "MemoryNest stores personal knowledge using Python and SQLite. "
+        "The application divides documents into chunks for retrieval. "
+        "Users can search their saved notes and receive grounded answers. "
+    ) * 30
+
+    # 1. Create a document and extract its text.
+    document = document_service.create_document(
+        db=db,
+        user_id=987654321,
+        filename="lifecycle_notes.txt",
+        file_bytes=original_text.encode("utf-8"),
+    )
+
+    document_id = document.id
+    user_id = document.user_id
+
+    assert document.extraction_status == "completed"
+    assert document.extracted_text_path is not None
+    assert Path(document.file_path).exists()
+    assert Path(document.extracted_text_path).exists()
+    assert (
+        Path(document.extracted_text_path).read_text(
+            encoding="utf-8"
+        )
+        == original_text.strip()
+    )
+
+    # 2. Convert extracted text into persisted chunks.
+    chunks = chunk_service.process_document_chunks(
+        db=db,
+        document=document,
+        user_id=user_id,
+        chunk_size=500,
+        chunk_overlap=50,
+    )
+
+    assert len(chunks) > 1
+    assert all(chunk.document_id == document_id for chunk in chunks)
+    assert all(chunk.user_id == user_id for chunk in chunks)
+
+    chunk_preview = (
+        setup["chunk_dir"]
+        / f"document_{document_id}_chunks.txt"
+    )
+    assert chunk_preview.exists()
+
+    assert (
+        db.query(DocumentChunk)
+        .filter(
+            DocumentChunk.document_id == document_id,
+            DocumentChunk.user_id == user_id,
+        )
+        .count()
+        == len(chunks)
+    )
+
+    # 3. Index the chunks using fake embeddings and an isolated vector store.
+    indexing_result = indexing_service.index_document(
+        db=db,
+        document_id=document_id,
+        user_id=user_id,
+        batch_size=2,
+    )
+
+    assert indexing_result["status"] == "completed"
+    assert indexing_result["total_chunks"] == len(chunks)
+    assert indexing_result["indexed"] == len(chunks)
+    assert indexing_result["knowledge_graph_status"] == "disabled"
+
+    assert len(setup["collection"].records) == len(chunks)
+
+    embedding_records = (
+        db.query(ChunkEmbedding)
+        .filter(
+            ChunkEmbedding.document_id == document_id,
+            ChunkEmbedding.user_id == user_id,
+        )
+        .all()
+    )
+
+    assert len(embedding_records) == len(chunks)
+
+    for record in embedding_records:
+        assert record.model_name == "test-embedding-model"
+        assert record.dimension == 3
+        assert record.vector_id in setup["collection"].records
+
+    # 4. Delete the document through the actual service.
+    deleted = document_service.delete_document(
+        db=db,
+        user_id=user_id,
+        document_id=document_id,
+    )
+
+    assert deleted is True
+
+    # 5. Verify that the SQL records and vectors are gone.
+    assert (
+        db.query(Document)
+        .filter(
+            Document.id == document_id,
+            Document.user_id == user_id,
+        )
+        .count()
+        == 0
+    )
+
+    assert (
+        db.query(DocumentChunk)
+        .filter(
+            DocumentChunk.document_id == document_id,
+            DocumentChunk.user_id == user_id,
+        )
+        .count()
+        == 0
+    )
+
+    remaining_embedding_count = (
+        db.query(func.count(ChunkEmbedding.id))
+        .filter(
+            ChunkEmbedding.document_id == document_id,
+            ChunkEmbedding.user_id == user_id,
+        )
+        .scalar()
+    )
+
+    assert remaining_embedding_count == 0, (
+        "Deleting a document should also remove its SQL embedding metadata."
+    )
+
+    assert setup["collection"].count() == 0
+
+    assert not Path(document.file_path).exists()
+    assert not Path(document.extracted_text_path).exists()
+    assert not chunk_preview.exists()
+
+    # Repeated deletion should be harmless.
+    assert (
+        document_service.delete_document(
+            db=db,
+            user_id=user_id,
+            document_id=document_id,
+        )
+        is False
+    )

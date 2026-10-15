@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.db.chunk_model import DocumentChunk
 from app.db.document_model import Document
+from app.db.embedding_model import ChunkEmbedding
 from app.services.ocr_service import extract_image_text
 from app.services.pdf_service import extract_pdf_with_ocr
 import logging
@@ -503,6 +504,17 @@ def delete_document(
     for chunk in chunks:
         db.delete(chunk)
 
+    embedding_records = (
+        db.query(ChunkEmbedding)
+        .filter(
+            ChunkEmbedding.document_id == document_id,
+            ChunkEmbedding.user_id == user_id,
+        )
+        .all()
+    )
+
+    for record in embedding_records:
+        db.delete(record)
     db.delete(document)
 
     # Commit database changes before removing local files.
