@@ -460,3 +460,99 @@ def test_delete_document_relationships_rejects_boolean_ids():
             user_id=1,
             document_id=True,
         )
+
+
+def test_replace_chunk_relationships_deletes_old_chunk_edges_before_writing(
+    mock_driver,
+):
+    _, session = mock_driver
+
+    session.run.return_value.consume.return_value = MagicMock()
+
+    first_record = {
+        "subject": "MemoryNest",
+        "subject_type": "project",
+        "relationship": "uses",
+        "object": "Python",
+        "object_type": "technology",
+        "source_filename": "MindNest.docx",
+        "document_id": 6,
+        "chunk_index": 2,
+    }
+    session.run.return_value.single.return_value = first_record
+
+    result = graph.replace_chunk_relationships(
+        relationships=[
+            {
+                "subject": "MemoryNest",
+                "subject_type": "project",
+                "relationship": "uses",
+                "object": "Python",
+                "object_type": "technology",
+            }
+        ],
+        user_id=1,
+        document_id=6,
+        chunk_index=2,
+        source_filename="MindNest.docx",
+    )
+
+    assert result == [first_record]
+    session.execute_write.assert_called_once()
+    assert session.run.call_count == 2
+
+    delete_call = session.run.call_args_list[0]
+    assert "document_id: $document_id" in delete_call.args[0]
+    assert "chunk_index: $chunk_index" in delete_call.args[0]
+    assert delete_call.kwargs == {
+        "user_id": 1,
+        "document_id": 6,
+        "chunk_index": 2,
+    }
+
+
+def test_replace_chunk_relationships_clears_chunk_when_list_is_empty(
+    mock_driver,
+):
+    _, session = mock_driver
+    session.run.return_value.consume.return_value = MagicMock()
+
+    result = graph.replace_chunk_relationships(
+        relationships=[],
+        user_id=1,
+        document_id=6,
+        chunk_index=2,
+        source_filename="MindNest.docx",
+    )
+
+    assert result == []
+    session.execute_write.assert_called_once()
+    session.run.assert_called_once()
+
+    query = session.run.call_args.args[0]
+    assert "chunk_index: $chunk_index" in query
+
+
+def test_replace_chunk_relationships_validates_before_graph_writes(
+    mock_driver,
+):
+    driver, _ = mock_driver
+
+    with pytest.raises(ValueError, match="subject"):
+        graph.replace_chunk_relationships(
+            relationships=[
+                {
+                    "subject": " ",
+                    "subject_type": "project",
+                    "relationship": "uses",
+                    "object": "Python",
+                    "object_type": "technology",
+                }
+            ],
+            user_id=1,
+            document_id=6,
+            chunk_index=2,
+            source_filename="MindNest.docx",
+        )
+
+    driver.session.assert_not_called()

@@ -43,7 +43,7 @@ def mocked_pipeline(monkeypatch):
 
     monkeypatch.setattr(
         pipeline,
-        "store_entity_relationships",
+        "replace_chunk_relationships",
         store_relationships,
     )
 
@@ -177,19 +177,24 @@ def test_empty_source_filename_is_rejected(monkeypatch):
         )
 
 
-def test_no_relationships_means_no_graph_writes(monkeypatch):
-    def fail_if_called(**kwargs):
-        pytest.fail("Neo4j should not be called without relationships.")
+
+def test_no_relationships_clears_existing_chunk_relationships(monkeypatch):
+    replacement_calls = []
 
     monkeypatch.setattr(
         pipeline,
         "extract_relationships",
         lambda text: [],
     )
+
+    def replace_relationships(**kwargs):
+        replacement_calls.append(kwargs)
+        return []
+
     monkeypatch.setattr(
         pipeline,
-        "store_entity_relationships",
-        fail_if_called,
+        "replace_chunk_relationships",
+        replace_relationships,
     )
 
     result = pipeline.process_chunk_for_knowledge_graph(
@@ -203,6 +208,15 @@ def test_no_relationships_means_no_graph_writes(monkeypatch):
     assert result["extracted_count"] == 0
     assert result["stored_count"] == 0
     assert result["relationships"] == []
+    assert replacement_calls == [
+        {
+            "relationships": [],
+            "user_id": 1,
+            "document_id": 6,
+            "chunk_index": 0,
+            "source_filename": "notes.txt",
+        }
+    ]
 
 
 def test_extraction_failure_does_not_write_to_graph(monkeypatch):
@@ -216,7 +230,7 @@ def test_extraction_failure_does_not_write_to_graph(monkeypatch):
     )
     monkeypatch.setattr(
         pipeline,
-        "store_entity_relationships",
+        "replace_chunk_relationships",
         lambda **kwargs: pytest.fail("Graph write should not run."),
     )
 
@@ -261,7 +275,7 @@ def test_storage_failure_does_not_report_success(monkeypatch):
     )
     monkeypatch.setattr(
         pipeline,
-        "store_entity_relationships",
+        "replace_chunk_relationships",
         store_with_failure,
     )
 

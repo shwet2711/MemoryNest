@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.services.entity_extraction_service import extract_relationships
-from app.services.knowledge_graph_service import store_entity_relationships
+from app.services.knowledge_graph_service import replace_chunk_relationships
 
 
 def _validate_positive_integer(value: int, field_name: str) -> int:
@@ -20,8 +20,7 @@ def process_chunk_for_knowledge_graph(
     text: str,
     source_filename: str,
 ) -> dict[str, Any]:
-    """Extract relationships from one chunk and store them atomically."""
-
+    """Extract and atomically replace relationships for one document chunk."""
     user_id = _validate_positive_integer(user_id, "user_id")
     document_id = _validate_positive_integer(document_id, "document_id")
 
@@ -38,20 +37,18 @@ def process_chunk_for_knowledge_graph(
 
     source_filename = source_filename.strip()
 
-    # Extract first. If extraction fails, no graph writes occur.
+    # Extract first. If extraction fails, existing graph data stays untouched.
     relationships = extract_relationships(text)
 
-    # Store all relationships from this chunk in one Neo4j transaction.
-    if relationships:
-        stored = store_entity_relationships(
-            relationships=relationships,
-            user_id=user_id,
-            document_id=document_id,
-            chunk_index=chunk_index,
-            source_filename=source_filename,
-        )
-    else:
-        stored = []
+    # An empty list is intentional: it clears obsolete relationships for
+    # this chunk when the updated text no longer contains known relationships.
+    stored = replace_chunk_relationships(
+        relationships=relationships,
+        user_id=user_id,
+        document_id=document_id,
+        chunk_index=chunk_index,
+        source_filename=source_filename,
+    )
 
     return {
         "user_id": user_id,

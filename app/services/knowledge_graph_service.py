@@ -303,6 +303,110 @@ def store_entity_relationships(
         return session.execute_write(_store_batch_in_transaction)
 
 
+def replace_chunk_relationships(
+    *,
+    relationships: list[dict[str, str]],
+    user_id: int,
+    document_id: int,
+    chunk_index: int,
+    source_filename: str,
+) -> list[dict[str, Any]]:
+    """Atomically replace all graph relationships belonging to one chunk."""
+    user_id = _require_positive_integer(user_id, "user_id")
+    document_id = _require_positive_integer(document_id, "document_id")
+
+    if isinstance(chunk_index, bool) or not isinstance(chunk_index, int):
+        raise ValueError("chunk_index must be an integer.")
+    if chunk_index < 0:
+        raise ValueError("chunk_index must be non-negative.")
+
+    source_filename = _require_text(source_filename, "source_filename")
+
+    if not isinstance(relationships, list):
+        raise ValueError("relationships must be a list.")
+
+    # Validate the entire replacement before making any graph changes.
+    prepared: list[tuple[str, dict[str, Any]]] = []
+
+    for item in relationships:
+        if not isinstance(item, dict):
+            raise ValueError("Each relationship must be a dictionary.")
+
+        subject = _require_text(item.get("subject"), "subject")
+        subject_type = _require_text(
+            item.get("subject_type"), "subject_type"
+        )
+        relationship = _require_text(
+            item.get("relationship"), "relationship"
+        )
+        object_name = _require_text(item.get("object"), "object")
+        object_type = _require_text(
+            item.get("object_type"), "object_type"
+        )
+
+        prepared.append(
+            (
+                _RELATIONSHIP_QUERY,
+                {
+                    "user_id": user_id,
+                    "document_id": document_id,
+                    "chunk_index": chunk_index,
+                    "subject": subject,
+                    "subject_normalized": _normalize_entity_name(subject),
+                    "subject_type": subject_type,
+                    "relationship": relationship,
+                    "object_name": object_name,
+                    "object_normalized": _normalize_entity_name(object_name),
+                    "object_type": object_type,
+                    "source_filename": source_filename,
+                },
+            )
+        )
+
+    delete_query = """
+    MATCH (s:Entity {user_id: $user_id})
+          -[r:RELATED_TO {
+              user_id: $user_id,
+              document_id: $document_id,
+              chunk_index: $chunk_index
+          }]->
+          (o:Entity {user_id: $user_id})
+
+    WITH
+        collect(DISTINCT s) + collect(DISTINCT o) AS endpoints,
+        collect(DISTINCT r) AS relationships
+
+    FOREACH (relationship IN relationships |
+        DELETE relationship
+    )
+
+    WITH endpoints
+    UNWIND endpoints AS entity
+    WITH DISTINCT entity
+    WHERE NOT (entity)--()
+    DELETE entity
+    """
+
+    def _replace_in_transaction(tx: Any) -> list[dict[str, Any]]:
+        # Consume the deletion query before writing replacements.
+        # An empty result is fine when this chunk has no old relationships.
+        tx.run(
+            delete_query,
+            user_id=user_id,
+            document_id=document_id,
+            chunk_index=chunk_index,
+        ).consume()
+
+        return [
+            _store_relationship_in_transaction(tx, query, parameters)
+            for query, parameters in prepared
+        ]
+
+    driver = get_driver()
+
+    with driver.session(database=NEO4J_DATABASE) as session:
+        return session.execute_write(_replace_in_transaction)
+
 
 def delete_document_relationships(
     *,
