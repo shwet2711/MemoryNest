@@ -183,3 +183,46 @@ def test_delete_document_does_not_remove_files_if_commit_fails(
     assert setup.chunk_preview.exists()
 
     service.delete_document_embeddings.assert_not_called()
+
+
+
+def test_delete_document_continues_if_graph_cleanup_fails(
+    deletion_setup,
+    monkeypatch,
+):
+    setup = deletion_setup
+    monkeypatch.setattr(service, "NEO4J_ENABLED", True)
+
+    monkeypatch.setattr(
+        service,
+        "delete_document_relationships",
+        MagicMock(
+            side_effect=RuntimeError("Neo4j unavailable")
+        ),
+    )
+
+    result = service.delete_document(
+        setup.db,
+        user_id=7,
+        document_id=12,
+    )
+
+    assert result is True
+
+    # Database changes are committed before graph cleanup.
+    setup.db.commit.assert_called_once()
+
+    # Vector cleanup and local file cleanup still complete.
+    service.delete_document_embeddings.assert_called_once_with(
+        document_id=12,
+        user_id=7,
+    )
+
+    assert not setup.uploaded_file.exists()
+    assert not setup.extracted_file.exists()
+    assert not setup.chunk_preview.exists()
+
+    service.delete_document_relationships.assert_called_once_with(
+        user_id=7,
+        document_id=12,
+    )
