@@ -7,6 +7,7 @@ from app.db.chunk_model import DocumentChunk  # noqa: F401
 from app.db.embedding_model import ChunkEmbedding  # noqa: F401
 from app.db.conversation_model import Conversation  # noqa: F401
 from app.db.message_model import Message  # noqa: F401
+from app.db.user_session_model import UserSession  # noqa: F401
 
 
 def init_database() -> None:

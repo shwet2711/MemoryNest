@@ -163,7 +163,11 @@ def process_document_chunks(
             source_filename=document.original_filename,
             file_type=document.file_type,
             page_number=None,
-            extraction_method="text",
+            extraction_method=getattr(
+            document,
+            "extraction_method",
+            "text",
+        ) or "text",
             content=content,
             character_count=len(content),
         )

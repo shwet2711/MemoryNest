@@ -14,7 +14,11 @@ from sqlalchemy.orm import Session
 from app.db.chunk_model import DocumentChunk
 from app.db.document_model import Document
 from app.db.embedding_model import ChunkEmbedding
-from app.services.ocr_service import extract_image_text
+from app.services.ocr_service import (
+    extract_image_text,
+    extract_image_text_with_confidence,
+)
+from app.services.ocr_quality_service import assess_ocr_text
 from app.services.pdf_service import extract_pdf_with_ocr
 import logging
 
@@ -244,83 +248,134 @@ def validate_image(
         }
 
 
-def extract_text(
+
+def extract_text_with_metadata(
     file_path: Path,
-) -> tuple[str, str]:
+) -> tuple[str, str, str, float | None]:
+    """
+    Extract text and return:
+    (text, status, extraction_method, OCR confidence).
+
+    OCR text is preserved even when its quality is low.
+    Confidence is None for files that do not use OCR.
+    """
 
     extension = file_path.suffix.lower()
 
-    # ---------------------------------------------------------
-    # PDF
-    # ---------------------------------------------------------
-
+    # PDF: combine page text and evaluate OCR pages.
     if extension == ".pdf":
+        pages = extract_pdf_with_ocr(file_path)
+        sections = []
+        ocr_confidences = []
+        ocr_methods = []
 
-        text = extract_pdf_text(
-            file_path
-        )
+        for page in pages:
+            page_text = page.get("text", "").strip()
 
-        if text:
-            return text, "completed"
+            if not page_text:
+                continue
 
-        return "", "ocr_required"
+            sections.append(
+                f"\n--- Page {page['page_number']} ---\n"
+            )
+            sections.append(page_text)
 
-    # ---------------------------------------------------------
-    # DOCX
-    # ---------------------------------------------------------
+            if page.get("method", "").startswith("ocr"):
+                ocr_methods.append(page["method"])
 
+                confidence = page.get("ocr_confidence")
+                if confidence is not None:
+                    ocr_confidences.append(float(confidence))
+
+        text = "\n".join(sections).strip()
+
+        if not text:
+            return "", "ocr_required", "ocr", None
+
+        if not ocr_methods:
+            method = "text"
+            confidence = None
+        else:
+            confidence = (
+                round(
+                    sum(ocr_confidences) / len(ocr_confidences),
+                    2,
+                )
+                if ocr_confidences
+                else None
+            )
+
+            if (
+                "ocr_low_confidence" in ocr_methods
+                or "ocr_failed" in ocr_methods
+                or confidence is None
+                or confidence < 60.0
+            ):
+                method = "ocr_low_confidence"
+            else:
+                method = "ocr"
+
+        return text, "completed", method, confidence
+
+    # DOCX: ordinary text extraction.
     if extension == ".docx":
-
-        text = extract_docx_text(
-            file_path
-        )
+        text = extract_docx_text(file_path)
 
         if text:
-            return text, "completed"
+            return text, "completed", "text", None
 
-        return "", "empty"
+        return "", "empty", "text", None
 
-    # ---------------------------------------------------------
-    # TXT
-    # ---------------------------------------------------------
-
+    # TXT: ordinary text extraction.
     if extension == ".txt":
-
-        text = extract_txt_text(
-            file_path
-        )
+        text = extract_txt_text(file_path)
 
         if text:
-            return text, "completed"
+            return text, "completed", "text", None
 
-        return "", "empty"
+        return "", "empty", "text", None
 
-    # ---------------------------------------------------------
-    # IMAGE
-    # ---------------------------------------------------------
+    # Images: capture OCR confidence directly.
+    if extension in {".jpg", ".jpeg", ".png"}:
+        validate_image(file_path)
 
-    if extension in {
-        ".jpg",
-        ".jpeg",
-        ".png",
-    }:
+        with Image.open(file_path) as image:
+            text, confidence = extract_image_text_with_confidence(
+                image
+            )
 
-        validate_image(
-            file_path
-        )
+        if not text:
+            return "", "ocr_failed", "ocr", confidence
 
-        text = extract_image_text(
-            file_path
-        )
+        quality = assess_ocr_text(text)
 
-        if text:
-            return text, "completed"
+        if (
+            confidence is None
+            or confidence < 60.0
+            or not quality.is_reliable
+        ):
+            method = "ocr_low_confidence"
+        else:
+            method = "ocr"
 
-        return "", "ocr_failed"
+        return text, "completed", method, confidence
 
     raise ValueError(
         f"Unsupported file extension: {extension}"
     )
+
+
+def extract_text(
+    file_path: Path,
+) -> tuple[str, str]:
+    """
+    Backward-compatible extraction interface.
+
+    Existing callers continue receiving (text, status).
+    """
+
+    text, status, _, _ = extract_text_with_metadata(file_path)
+    return text, status
 
 
 def save_extracted_text(
@@ -404,12 +459,16 @@ def create_document(
 
         db.flush()
 
-        text, status = extract_text(
-            file_path
-        )
+        (
+            text,
+            status,
+            extraction_method,
+            ocr_confidence,
+        ) = extract_text_with_metadata(file_path)
 
         document.extraction_status = status
-
+        document.extraction_method = extraction_method
+        document.ocr_confidence = ocr_confidence
         if text:
 
             extracted_path = (

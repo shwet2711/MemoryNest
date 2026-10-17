@@ -1,18 +1,21 @@
 import streamlit as st
+import extra_streamlit_components as stx
 
 from app.db.init_db import init_database
+from app.db.session import SessionLocal
+from app.services.session_service import get_user_for_session
 from app.ui.auth_ui import authentication_page
-from app.ui.dashboard import dashboard_page
+from app.ui.dashboard import dashboard_page, placeholder_page
 from app.ui.documents import documents_page
-from app.ui.dashboard import placeholder_page
 from app.ui.sidebar import render_sidebar
 from app.ui.styles import apply_custom_css
 from app.ui.ai_chat import ai_chat_page
 from app.ui.summary import summary_page
+from app.ui.knowledge_graph import knowledge_graph_page
 
-# ============================================================
-# PAGE CONFIGURATION
-# ============================================================
+
+SESSION_COOKIE_NAME = "memorynest_session"
+
 
 st.set_page_config(
     page_title="MemoryNest",
@@ -21,84 +24,72 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-
-# ============================================================
-# GLOBAL STYLING
-# ============================================================
-
 apply_custom_css()
-
-
-# ============================================================
-# DATABASE
-# ============================================================
-
 init_database()
 
+# Keep this component key stable across Streamlit reruns.
+cookies = stx.CookieManager(key="memorynest_cookies")
 
-# ============================================================
-# MAIN
-# ============================================================
 
-def main():
+def restore_login_from_cookie() -> bool:
+    """Restore the logged-in user from a valid browser session cookie."""
+    token = cookies.get(cookie=SESSION_COOKIE_NAME)
 
+    if not token or not isinstance(token, str):
+        return False
+
+    db = SessionLocal()
+    try:
+        user = get_user_for_session(db, token)
+
+        if user is None:
+            return False
+
+        st.session_state["user_id"] = user.id
+        st.session_state["username"] = user.username
+        st.session_state["session_token"] = token
+        return True
+    finally:
+        db.close()
+
+
+def main() -> None:
     if "user_id" not in st.session_state:
+        if not restore_login_from_cookie():
+            authentication_page(cookies)
+            return
 
-        authentication_page()
-
-        return
-
-    selected_page = render_sidebar()
+    selected_page = render_sidebar(cookies)
 
     if selected_page == "Dashboard":
-
         dashboard_page()
-
     elif selected_page == "Documents":
-
         documents_page()
-
     elif selected_page == "AI Chat":
         ai_chat_page()
-
     elif selected_page == "Summaries":
-
         summary_page()
-
+    elif selected_page == "Knowledge Graph":
+        knowledge_graph_page()
     elif selected_page == "Memories":
-
         placeholder_page(
             title="Memories",
             icon="🧠",
-            description=(
-                "Explore important information "
-                "extracted from your knowledge base."
-            ),
+            description="Explore important information extracted from your knowledge base.",
         )
-
     elif selected_page == "Search":
-
         placeholder_page(
             title="Search",
             icon="🔎",
-            description=(
-                "Search your personal knowledge "
-                "using semantic search."
-            ),
+            description="Search your personal knowledge using semantic search.",
         )
-
     elif selected_page == "Settings":
-
         placeholder_page(
             title="Settings",
             icon="⚙️",
-            description=(
-                "Manage your MemoryNest account "
-                "and application preferences."
-            ),
+            description="Manage your MemoryNest account and application preferences.",
         )
 
 
 if __name__ == "__main__":
-
     main()

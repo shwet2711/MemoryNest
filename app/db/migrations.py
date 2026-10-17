@@ -1,3 +1,4 @@
+
 from sqlalchemy import inspect, text
 
 from app.db.database import engine
@@ -8,6 +9,8 @@ def add_column_if_missing(
     column_name: str,
     column_definition: str,
 ) -> bool:
+    """Add a column only when it does not already exist."""
+
     inspector = inspect(engine)
 
     existing_columns = {
@@ -35,6 +38,19 @@ def run_migrations() -> None:
 
     inspector = inspect(engine)
     tables = inspector.get_table_names()
+
+    if "documents" in tables:
+        add_column_if_missing(
+            "documents",
+            "extraction_method",
+            "VARCHAR(30) NOT NULL DEFAULT 'text'",
+        )
+
+        add_column_if_missing(
+            "documents",
+            "ocr_confidence",
+            "FLOAT",
+        )
 
     if "document_chunks" in tables:
         add_column_if_missing(

@@ -1,6 +1,7 @@
-from datetime import datetime
 
-from sqlalchemy import DateTime, Integer, String, Text
+from datetime import UTC, datetime
+
+from sqlalchemy import DateTime, Float, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.database import Base
@@ -8,7 +9,7 @@ from app.db.database import Base
 
 class Document(Base):
     """
-    Stores metadata for documents uploaded to MemoryNest.
+    Stores document metadata and extraction-quality information.
     """
 
     __tablename__ = "documents"
@@ -62,6 +63,17 @@ class Document(Base):
         default="pending",
     )
 
+    extraction_method: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        default="text",
+    )
+
+    ocr_confidence: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+
     title: Mapped[str | None] = mapped_column(
         String(255),
         nullable=True,
@@ -74,13 +86,13 @@ class Document(Base):
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=datetime.utcnow,
+        default=lambda: datetime.now(UTC).replace(tzinfo=None),
         nullable=False,
     )
 
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=datetime.utcnow,
-        onupdate=datetime.utcnow,
+        default=lambda: datetime.now(UTC).replace(tzinfo=None),
+        onupdate=lambda: datetime.now(UTC).replace(tzinfo=None),
         nullable=False,
     )

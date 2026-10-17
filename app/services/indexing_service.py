@@ -38,9 +38,11 @@ def index_document(
     """
     Index document chunks in ChromaDB and synchronize SQLite metadata.
 
-    When Neo4j is enabled and available, also process chunks for the
-    optional knowledge graph. Graph failures do not undo successful
-    vector indexing.
+    When Neo4j is enabled and available, also process reliable chunks
+    for the optional knowledge graph. Low-confidence OCR chunks remain
+    searchable but are skipped during graph processing.
+
+    Graph failures do not undo successful vector indexing.
     """
 
     if (
@@ -102,6 +104,8 @@ def index_document(
     indexed_count = 0
 
     # Preserve the existing vector-indexing workflow.
+    # All chunks remain available for semantic search, including OCR
+    # text that has been flagged as low-confidence.
     for start in range(0, len(chunks), batch_size):
         batch = chunks[start:start + batch_size]
         texts = [chunk.content for chunk in batch]
@@ -168,11 +172,12 @@ def index_document(
     if stale_records:
         db.commit()
 
-    # Report graph processing separately from successful vector indexing.
+    # Report graph processing separately from vector indexing.
     graph_result = {
         "knowledge_graph_status": "disabled",
         "knowledge_graph_processed_chunks": 0,
         "knowledge_graph_failed_chunks": 0,
+        "knowledge_graph_skipped_low_confidence_chunks": 0,
         "knowledge_graph_relationships_stored": 0,
     }
 
@@ -190,12 +195,34 @@ def index_document(
                 document_id,
             )
             graph_result["knowledge_graph_status"] = "unavailable"
+
         else:
             processed_count = 0
             failed_count = 0
+            skipped_count = 0
             relationship_count = 0
 
             for chunk in chunks:
+                extraction_method = (
+                    getattr(chunk, "extraction_method", "text")
+                    or "text"
+                )
+
+                # Skip unreliable OCR before graph processing.
+                # In particular, do not call the relationship
+                # replacement pipeline for these chunks, because
+                # an empty extraction could remove existing links.
+                if extraction_method == "ocr_low_confidence":
+                    skipped_count += 1
+
+                    logger.info(
+                        "Knowledge graph skipped low-confidence OCR "
+                        "for document %s, chunk %s.",
+                        document_id,
+                        chunk.chunk_index,
+                    )
+                    continue
+
                 try:
                     result = process_chunk_for_knowledge_graph(
                         user_id=user_id,
@@ -210,6 +237,7 @@ def index_document(
 
                 except Exception:
                     failed_count += 1
+
                     logger.exception(
                         "Knowledge graph processing failed for "
                         "document %s, chunk %s.",
@@ -217,7 +245,9 @@ def index_document(
                         chunk.chunk_index,
                     )
 
-            if failed_count == 0:
+            if skipped_count == len(chunks):
+                graph_status = "skipped_low_confidence"
+            elif failed_count == 0:
                 graph_status = "completed"
             elif processed_count == 0:
                 graph_status = "failed"
@@ -228,6 +258,9 @@ def index_document(
                 "knowledge_graph_status": graph_status,
                 "knowledge_graph_processed_chunks": processed_count,
                 "knowledge_graph_failed_chunks": failed_count,
+                "knowledge_graph_skipped_low_confidence_chunks": (
+                    skipped_count
+                ),
                 "knowledge_graph_relationships_stored": (
                     relationship_count
                 ),

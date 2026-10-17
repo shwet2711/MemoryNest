@@ -26,6 +26,7 @@ def make_db(chunks, records=None):
     return db
 
 
+
 def make_chunk(
     chunk_id=10,
     document_id=6,
@@ -33,6 +34,7 @@ def make_chunk(
     chunk_index=0,
     content="MemoryNest uses Python and SQLite.",
     filename="notes.txt",
+    extraction_method="text",
 ):
     return SimpleNamespace(
         id=chunk_id,
@@ -41,6 +43,7 @@ def make_chunk(
         chunk_index=chunk_index,
         content=content,
         source_filename=filename,
+        extraction_method=extraction_method,
     )
 
 
@@ -290,3 +293,101 @@ def test_partial_graph_failure_is_reported(monkeypatch):
     assert result["knowledge_graph_processed_chunks"] == 1
     assert result["knowledge_graph_failed_chunks"] == 1
     assert result["knowledge_graph_relationships_stored"] == 2
+
+
+def test_low_confidence_ocr_is_skipped_by_knowledge_graph(
+    monkeypatch,
+):
+    chunks = [
+        make_chunk(
+            chunk_id=10,
+            chunk_index=0,
+            extraction_method="ocr_low_confidence",
+        ),
+        make_chunk(
+            chunk_id=11,
+            chunk_index=1,
+            content="Reliable text about MemoryNest.",
+            extraction_method="text",
+        ),
+    ]
+    db = make_db(chunks)
+    mock_vector_indexing(monkeypatch)
+
+    monkeypatch.setattr(indexing_service, "NEO4J_ENABLED", True)
+    monkeypatch.setattr(
+        indexing_service,
+        "check_neo4j_connection",
+        lambda: {"enabled": True, "available": True},
+    )
+
+    graph_mock = MagicMock(return_value={"stored_count": 2})
+    monkeypatch.setattr(
+        indexing_service,
+        "process_chunk_for_knowledge_graph",
+        graph_mock,
+    )
+
+    result = index_document(db, document_id=6, user_id=1)
+
+    # Both chunks remain available to vector search.
+    assert result["indexed"] == 2
+
+    # Only the reliable chunk is processed by the graph pipeline.
+    assert result["knowledge_graph_status"] == "completed"
+    assert result["knowledge_graph_processed_chunks"] == 1
+    assert result["knowledge_graph_failed_chunks"] == 0
+    assert result["knowledge_graph_skipped_low_confidence_chunks"] == 1
+    assert result["knowledge_graph_relationships_stored"] == 2
+
+    graph_mock.assert_called_once()
+    assert graph_mock.call_args.kwargs["chunk_index"] == 1
+
+
+def test_all_low_confidence_ocr_chunks_are_skipped(
+    monkeypatch,
+):
+    chunks = [
+        make_chunk(
+            chunk_id=10,
+            chunk_index=0,
+            extraction_method="ocr_low_confidence",
+        ),
+        make_chunk(
+            chunk_id=11,
+            chunk_index=1,
+            extraction_method="ocr_low_confidence",
+        ),
+    ]
+    db = make_db(chunks)
+    mock_vector_indexing(monkeypatch)
+
+    monkeypatch.setattr(indexing_service, "NEO4J_ENABLED", True)
+    monkeypatch.setattr(
+        indexing_service,
+        "check_neo4j_connection",
+        lambda: {"enabled": True, "available": True},
+    )
+
+    graph_mock = MagicMock()
+    monkeypatch.setattr(
+        indexing_service,
+        "process_chunk_for_knowledge_graph",
+        graph_mock,
+    )
+
+    result = index_document(db, document_id=6, user_id=1)
+
+    # Vector indexing must still succeed for both chunks.
+    assert result["indexed"] == 2
+
+    assert (
+        result["knowledge_graph_status"]
+        == "skipped_low_confidence"
+    )
+    assert result["knowledge_graph_processed_chunks"] == 0
+    assert result["knowledge_graph_failed_chunks"] == 0
+    assert result["knowledge_graph_skipped_low_confidence_chunks"] == 2
+
+    # Crucially, the relationship replacement pipeline is never called.
+    graph_mock.assert_not_called()

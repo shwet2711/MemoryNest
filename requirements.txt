@@ -17,3 +17,8 @@ pyttsx3
 
 pytest==9.1.1
 neo4j==6.4.0
+
+pyvis
+
+extra-streamlit-components==0.1.81
+#  python -m streamlit run app\main.py

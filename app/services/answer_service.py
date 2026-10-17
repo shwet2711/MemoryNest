@@ -10,6 +10,9 @@ from app.core.config import RAG_GROUNDING_DISTANCE
 from app.services.prompt_service import build_chat_prompt
 from app.services.rag_evaluation_service import evaluate_rag_context
 from app.services.rag_service import get_rag_context
+from app.services.knowledge_graph_retrieval_service import (
+    retrieve_graph_context,
+)
 from app.services.retrieval_service import get_max_distance
 
 
@@ -114,7 +117,7 @@ def _extract_sources(
 
     sources: list[SourceInfo] = []
 
-    seen: set[tuple[Any, Any, Any]] = set()
+    seen: set[tuple[Any, ...]] = set()
 
     for result in results:
         if not isinstance(result, dict):
@@ -134,10 +137,13 @@ def _extract_sources(
         chunk_index = metadata.get("chunk_index")
         distance = result.get("distance")
 
+        document_id = metadata.get("document_id")
+
         source_key = (
             str(filename),
             page_number,
             chunk_index,
+            document_id,
         )
 
         if source_key in seen:
@@ -151,6 +157,7 @@ def _extract_sources(
                 page_number=page_number,
                 chunk_index=chunk_index,
                 distance=distance,
+                document_id=document_id,
             )
         )
 
@@ -340,6 +347,59 @@ def answer_query(
             "ollama_available": True,
             "rag_evaluation": rag_evaluation,
         }
+
+    # ---------------------------------------------------------
+    # Retrieve supplementary knowledge-graph evidence
+    # ---------------------------------------------------------
+
+    graph_data = retrieve_graph_context(
+        user_id=user_id,
+        query=clean_query,
+        document_id=result_document_id,
+    )
+
+    graph_context = graph_data.get("context", "")
+    if isinstance(graph_context, str) and graph_context.strip():
+        context = (
+            context.rstrip()
+            + "\n\n"
+            + "Supplementary knowledge-graph evidence "
+              "(reference material only):\n"
+            + graph_context.strip()
+        )
+
+    existing_source_keys = {
+        (
+            source.get("filename"),
+            source.get("page_number"),
+            source.get("chunk_index"),
+            source.get("document_id"),
+        )
+        for source in sources
+    }
+
+    for graph_source in graph_data.get("sources", []):
+        source_key = (
+            graph_source.get("filename"),
+            None,
+            graph_source.get("chunk_index"),
+            graph_source.get("document_id"),
+        )
+
+        if source_key in existing_source_keys:
+            continue
+
+        sources.append(
+            SourceInfo(
+                filename=graph_source["filename"],
+                page_number=None,
+                chunk_index=graph_source.get("chunk_index"),
+                distance=None,
+                evidence_type="knowledge_graph",
+                document_id=graph_source.get("document_id"),
+            )
+        )
+        existing_source_keys.add(source_key)
 
     # ---------------------------------------------------------
     # Build Ollama prompts

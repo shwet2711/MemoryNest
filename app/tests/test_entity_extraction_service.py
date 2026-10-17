@@ -108,14 +108,15 @@ def test_invalid_relationship_items_are_skipped(monkeypatch):
     assert result[0]["subject_type"] == "other"
 
 
-def test_missing_relationship_list_returns_empty_list(monkeypatch):
+def test_missing_relationship_list_raises_value_error(monkeypatch):
     monkeypatch.setattr(
         extraction.requests,
         "post",
         lambda *args, **kwargs: fake_ollama_response({}),
     )
 
-    assert extraction.extract_relationships("A factual paragraph.") == []
+    with pytest.raises(ValueError, match="missing.*relationships"):
+        extraction.extract_relationships("A factual paragraph.")
 
 
 def test_invalid_relationship_list_raises_value_error(monkeypatch):
@@ -130,6 +131,25 @@ def test_invalid_relationship_list_raises_value_error(monkeypatch):
     with pytest.raises(ValueError, match="JSON list"):
         extraction.extract_relationships("Some document text.")
 
+def test_all_invalid_relationship_items_raise_value_error(monkeypatch):
+    monkeypatch.setattr(
+        extraction.requests,
+        "post",
+        lambda *args, **kwargs: fake_ollama_response(
+            {
+                "relationships": [
+                    None,
+                    {"subject": "Only a subject"},
+                ]
+            }
+        ),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="none passed validation",
+    ):
+        extraction.extract_relationships("A factual paragraph.")
 
 def test_invalid_model_json_raises_value_error(monkeypatch):
     response = MagicMock()
@@ -288,3 +308,43 @@ def test_prompt_contains_entity_type_and_grounding_rules(monkeypatch):
     assert "explicitly supported" in prompt
     assert "do not label a technology or software component as an organization" in prompt
     assert "category label as both relationship and object" in prompt
+
+def test_rejects_entity_not_present_in_source(monkeypatch):
+    monkeypatch.setattr(
+        extraction.requests,
+        "post",
+        lambda *args, **kwargs: fake_ollama_response(
+            {
+                "relationships": [
+                    {
+                        "subject": "MemoryNest",
+                        "subject_type": "project",
+                        "relationship": "uses",
+                        "object": "FabricatedDatabase",
+                        "object_type": "technology",
+                    }
+                ]
+            }
+        ),
+    )
+
+    result = extraction.extract_relationships(
+        "MemoryNest uses SQLite."
+    )
+
+    assert result == []
+
+
+def test_entity_grounding_ignores_case_and_punctuation():
+    source = "MemoryNest uses Python, and SQLite stores its data."
+
+    assert extraction._entity_is_grounded("memorynest", source)
+    assert extraction._entity_is_grounded("SQLite", source)
+    assert not extraction._entity_is_grounded("FabricatedDatabase", source)
+
+
+def test_rejects_partial_word_entity_match():
+    source = "The employee receives Salary."
+
+    assert not extraction._entity_is_grounded("Salasy", source)
+    assert extraction._entity_is_grounded("Salary", source)

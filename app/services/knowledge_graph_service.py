@@ -511,3 +511,37 @@ def find_entity_relationships(
         )
 
         return [dict(record) for record in records]
+
+
+
+def get_user_knowledge_graph(
+    *,
+    user_id: int,
+) -> list[dict[str, Any]]:
+    """Return every stored relationship for one user's graph."""
+
+    user_id = _require_positive_integer(user_id, "user_id")
+
+    query = """
+    MATCH (s:Entity {user_id: $user_id})
+          -[r:RELATED_TO {user_id: $user_id}]->
+          (o:Entity {user_id: $user_id})
+
+    RETURN
+        s.name AS subject,
+        s.entity_type AS subject_type,
+        r.relationship AS relationship,
+        o.name AS object,
+        o.entity_type AS object_type,
+        r.source_filename AS source_filename,
+        r.document_id AS document_id,
+        r.chunk_index AS chunk_index
+
+    ORDER BY r.document_id, r.chunk_index, s.name, o.name
+    """
+
+    driver = get_driver()
+
+    with driver.session(database=NEO4J_DATABASE) as session:
+        records = session.run(query, user_id=user_id)
+        return [dict(record) for record in records]
