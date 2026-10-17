@@ -101,3 +101,97 @@ def test_rejects_invalid_user_id():
         assert "user_id" in str(exc)
     else:
         raise AssertionError("Expected invalid user_id to be rejected.")
+
+
+def test_more_relevant_graph_fact_is_ranked_first():
+    facts = [
+        {
+            "subject": "Python",
+            "relationship": "related to",
+            "object": "Programming",
+            "source_filename": "General.docx",
+            "document_id": 6,
+            "chunk_index": 0,
+        },
+        {
+            "subject": "Python",
+            "relationship": "used for",
+            "object": "Data Science",
+            "source_filename": "DataScience.docx",
+            "document_id": 7,
+            "chunk_index": 2,
+        },
+    ]
+
+    with patch(
+        "app.services.knowledge_graph_retrieval_service."
+        "get_user_knowledge_graph",
+        return_value=facts,
+    ):
+        result = retrieve_graph_context(
+            user_id=1,
+            query="How is Python used for Data Science?",
+            limit=2,
+        )
+
+    assert len(result["relationships"]) == 2
+    assert (
+        result["relationships"][0]["object"]
+        == "Data Science"
+    )
+
+
+def test_graph_limit_is_applied_after_relevance_ranking():
+    facts = [
+        {
+            "subject": "Python",
+            "relationship": "related to",
+            "object": "Programming",
+            "source_filename": "General.docx",
+            "document_id": 6,
+            "chunk_index": 0,
+        },
+        {
+            "subject": "Python",
+            "relationship": "used for",
+            "object": "Data Science",
+            "source_filename": "DataScience.docx",
+            "document_id": 7,
+            "chunk_index": 2,
+        },
+    ]
+
+    with patch(
+        "app.services.knowledge_graph_retrieval_service."
+        "get_user_knowledge_graph",
+        return_value=facts,
+    ):
+        result = retrieve_graph_context(
+            user_id=1,
+            query="Python Data Science",
+            limit=1,
+        )
+
+    assert len(result["relationships"]) == 1
+    assert (
+        result["relationships"][0]["source_filename"]
+        == "DataScience.docx"
+    )
+
+
+def test_graph_ranking_preserves_document_filter():
+    with patch(
+        "app.services.knowledge_graph_retrieval_service."
+        "get_user_knowledge_graph",
+        return_value=GRAPH_FACTS,
+    ):
+        result = retrieve_graph_context(
+            user_id=1,
+            query="Python SQL Databases",
+            document_id=6,
+        )
+
+    assert all(
+        item["document_id"] == 6
+        for item in result["relationships"]
+    )

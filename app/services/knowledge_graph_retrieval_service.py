@@ -1,4 +1,5 @@
-﻿from __future__ import annotations
+﻿
+from __future__ import annotations
 
 import re
 from typing import Any
@@ -8,18 +9,78 @@ from app.services.knowledge_graph_service import (
 )
 
 
+STOP_WORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "by",
+    "can", "could", "did", "do", "does", "for", "from",
+    "how", "i", "in", "into", "is", "it", "me", "of",
+    "on", "or", "please", "show", "tell", "that", "the",
+    "their", "this", "to", "use", "used", "using", "was",
+    "what", "when", "where", "which", "who", "why", "with",
+    "would",
+}
+
+
 def _entity_is_mentioned(entity_name: str, query: str) -> bool:
-    """Check whether an entity name occurs as a whole phrase in a query."""
+    """Check whether an entity name occurs as a whole phrase."""
     name = entity_name.strip()
+
     if not name:
         return False
 
-    pattern = (
-        r"(?<!\w)"
-        + re.escape(name)
-        + r"(?!\w)"
+    pattern = r"(?<!\w)" + re.escape(name) + r"(?!\w)"
+
+    return (
+        re.search(pattern, query, flags=re.IGNORECASE)
+        is not None
     )
-    return re.search(pattern, query, flags=re.IGNORECASE) is not None
+
+
+def _query_terms(query: str) -> set[str]:
+    """Extract meaningful query terms for relevance ranking."""
+    terms = re.findall(r"\b[\w-]+\b", query.casefold())
+
+    return {
+        term
+        for term in terms
+        if len(term) > 2 and term not in STOP_WORDS
+    }
+
+
+def _relationship_relevance_score(
+    relationship: dict[str, Any],
+    query: str,
+    query_terms: set[str],
+) -> int:
+    """
+    Rank a graph fact using explicit entity mentions and term overlap.
+
+    This score orders supplementary graph facts. It is not a
+    confidence score and must not replace vector-grounding checks.
+    """
+    subject = str(relationship.get("subject") or "").strip()
+    relation = str(relationship.get("relationship") or "").strip()
+    obj = str(relationship.get("object") or "").strip()
+
+    score = 0
+
+    # Explicit entity mentions are the main relevance signal.
+    if _entity_is_mentioned(subject, query):
+        score += 5
+
+    if _entity_is_mentioned(obj, query):
+        score += 5
+
+    # Give additional weight to meaningful terms in the fact.
+    fact_terms = set(
+        re.findall(
+            r"\b[\w-]+\b",
+            f"{subject} {relation} {obj}".casefold(),
+        )
+    )
+
+    score += 2 * len(query_terms.intersection(fact_terms))
+
+    return score
 
 
 def retrieve_graph_context(
@@ -30,12 +91,17 @@ def retrieve_graph_context(
     limit: int = 8,
 ) -> dict[str, Any]:
     """
-    Retrieve graph relationships relevant to an explicit entity mention.
+    Retrieve and rank graph relationships relevant to explicit
+    entity mentions.
 
-    Graph results are supplementary evidence. This function does not
-    decide whether an answer is sufficiently grounded.
+    Graph results are supplementary evidence. This function does
+    not decide whether an answer is sufficiently grounded.
     """
-    if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0:
+    if (
+        isinstance(user_id, bool)
+        or not isinstance(user_id, int)
+        or user_id <= 0
+    ):
         raise ValueError("user_id must be a positive integer.")
 
     if not isinstance(query, str) or not query.strip():
@@ -47,17 +113,26 @@ def retrieve_graph_context(
             or not isinstance(document_id, int)
             or document_id <= 0
         ):
-            raise ValueError("document_id must be a positive integer.")
+            raise ValueError(
+                "document_id must be a positive integer."
+            )
 
-    if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+    if (
+        isinstance(limit, bool)
+        or not isinstance(limit, int)
+        or limit <= 0
+    ):
         raise ValueError("limit must be a positive integer.")
 
     clean_query = query.strip()
+    query_terms = _query_terms(clean_query)
 
     try:
-        relationships = get_user_knowledge_graph(user_id=user_id)
+        relationships = get_user_knowledge_graph(
+            user_id=user_id
+        )
     except Exception:
-        # The optional graph must not break ordinary vector-based chat.
+        # Neo4j must remain optional; vector retrieval can still work.
         return {
             "available": False,
             "relationships": [],
@@ -65,20 +140,30 @@ def retrieve_graph_context(
             "sources": [],
         }
 
-    relevant: list[dict[str, Any]] = []
+    # Keep the original position as a stable tie-breaker.
+    candidates: list[tuple[int, int, dict[str, Any]]] = []
     seen: set[tuple[Any, ...]] = set()
 
-    for relationship in relationships:
+    for position, relationship in enumerate(relationships):
         if not isinstance(relationship, dict):
             continue
 
-        if document_id is not None:
-            if relationship.get("document_id") != document_id:
-                continue
+        if (
+            document_id is not None
+            and relationship.get("document_id") != document_id
+        ):
+            continue
 
-        subject = str(relationship.get("subject") or "").strip()
-        obj = str(relationship.get("object") or "").strip()
+        subject = str(
+            relationship.get("subject") or ""
+        ).strip()
 
+        obj = str(
+            relationship.get("object") or ""
+        ).strip()
+
+        # Preserve conservative matching: at least one entity must
+        # be explicitly mentioned in the user's query.
         if not (
             _entity_is_mentioned(subject, clean_query)
             or _entity_is_mentioned(obj, clean_query)
@@ -87,7 +172,9 @@ def retrieve_graph_context(
 
         key = (
             subject.casefold(),
-            str(relationship.get("relationship") or "").casefold(),
+            str(
+                relationship.get("relationship") or ""
+            ).casefold(),
             obj.casefold(),
             relationship.get("document_id"),
             relationship.get("chunk_index"),
@@ -98,19 +185,40 @@ def retrieve_graph_context(
             continue
 
         seen.add(key)
-        relevant.append(relationship)
 
-        if len(relevant) >= limit:
-            break
+        score = _relationship_relevance_score(
+            relationship,
+            clean_query,
+            query_terms,
+        )
+
+        candidates.append((score, position, relationship))
+
+    # Higher relevance first; preserve original order for equal scores.
+    candidates.sort(key=lambda item: (-item[0], item[1]))
+
+    relevant = [
+        relationship
+        for _, _, relationship in candidates[:limit]
+    ]
 
     context_parts: list[str] = []
     sources: list[dict[str, Any]] = []
+    seen_sources: set[tuple[Any, ...]] = set()
 
     for index, item in enumerate(relevant, start=1):
-        subject = str(item.get("subject") or "Unknown entity")
-        relation = str(item.get("relationship") or "related to")
-        obj = str(item.get("object") or "Unknown entity")
-        filename = str(item.get("source_filename") or "Unknown source")
+        subject = str(
+            item.get("subject") or "Unknown entity"
+        )
+        relation = str(
+            item.get("relationship") or "related to"
+        )
+        obj = str(
+            item.get("object") or "Unknown entity"
+        )
+        filename = str(
+            item.get("source_filename") or "Unknown source"
+        )
         chunk_index = item.get("chunk_index")
         source_document_id = item.get("document_id")
 
@@ -122,15 +230,23 @@ def retrieve_graph_context(
             f"Chunk: {chunk_index}"
         )
 
-        source = {
-            "filename": filename,
-            "document_id": source_document_id,
-            "chunk_index": chunk_index,
-            "evidence_type": "knowledge_graph",
-        }
+        source_key = (
+            filename,
+            source_document_id,
+            chunk_index,
+        )
 
-        if source not in sources:
-            sources.append(source)
+        if source_key not in seen_sources:
+            seen_sources.add(source_key)
+
+            sources.append(
+                {
+                    "filename": filename,
+                    "document_id": source_document_id,
+                    "chunk_index": chunk_index,
+                    "evidence_type": "knowledge_graph",
+                }
+            )
 
     return {
         "available": True,

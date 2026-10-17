@@ -265,3 +265,119 @@ def test_answer_query_allows_strong_context_to_ollama():
     )
     assert result["rag_evaluation"]["grounding_ready"] is True
     generate.assert_called_once()
+
+
+
+def test_retrieval_only_includes_graph_evidence_and_source():
+    fake_rag = {
+        "query": "What is MindSync?",
+        "document_id": 6,
+        "results": [
+            {
+                "content": "MindSync manages personal information.",
+                "metadata": {
+                    "source_filename": "MindSync.docx",
+                    "document_id": 6,
+                    "chunk_index": 4,
+                },
+                "distance": 0.3,
+            }
+        ],
+        "context": "MindSync manages personal information.",
+        "has_context": True,
+    }
+
+    fake_graph = {
+        "available": True,
+        "context": (
+            "[Graph fact 1]\n"
+            "Fact: MindSync --stores--> Memories\n"
+            "Source file: MindSync.docx\n"
+            "Document ID: 6\n"
+            "Chunk: 4"
+        ),
+        "sources": [
+            {
+                "filename": "MindSync.docx",
+                "document_id": 6,
+                "chunk_index": 4,
+                "evidence_type": "knowledge_graph",
+            }
+        ],
+    }
+
+    with patch(
+        "app.services.answer_service.get_rag_context",
+        return_value=fake_rag,
+    ), patch(
+        "app.services.answer_service.is_ollama_available",
+        return_value=False,
+    ), patch(
+        "app.services.answer_service.retrieve_graph_context",
+        return_value=fake_graph,
+    ) as graph_retrieval:
+        result = answer_query(
+            user_id=1,
+            query="What is MindSync?",
+            document_id=6,
+            use_ollama=False,
+        )
+
+    assert "Supplementary knowledge-graph evidence" in result["context"]
+    assert "MindSync --stores--> Memories" in result["context"]
+    assert any(
+        source.get("evidence_type") == "knowledge_graph"
+        for source in result["sources"]
+    )
+    assert result["document_id"] == 6
+
+    graph_retrieval.assert_called_once_with(
+        user_id=1,
+        query="What is MindSync?",
+        document_id=6,
+    )
+
+
+def test_graph_failure_does_not_break_retrieval_only_answer():
+    fake_rag = {
+        "query": "What is MindSync?",
+        "results": [
+            {
+                "content": "MindSync manages personal information.",
+                "metadata": {
+                    "source_filename": "MindSync.docx",
+                    "chunk_index": 4,
+                },
+                "distance": 0.3,
+            }
+        ],
+        "context": "MindSync manages personal information.",
+        "has_context": True,
+    }
+
+    with patch(
+        "app.services.answer_service.get_rag_context",
+        return_value=fake_rag,
+    ), patch(
+        "app.services.answer_service.is_ollama_available",
+        return_value=False,
+    ), patch(
+        "app.services.answer_service.retrieve_graph_context",
+        side_effect=RuntimeError("Graph service unavailable"),
+    ):
+        result = answer_query(
+            user_id=1,
+            query="What is MindSync?",
+            use_ollama=False,
+        )
+
+    assert result["mode"] == "retrieval_only"
+    assert "MindSync manages personal information." in result["context"]
+    assert any(
+        source.get("filename") == "MindSync.docx"
+        for source in result["sources"]
+    )
+    assert not any(
+        source.get("evidence_type") == "knowledge_graph"
+        for source in result["sources"]
+    )

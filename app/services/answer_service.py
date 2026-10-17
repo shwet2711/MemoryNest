@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import os
@@ -7,12 +8,12 @@ import requests
 from dotenv import load_dotenv
 
 from app.core.config import RAG_GROUNDING_DISTANCE
-from app.services.prompt_service import build_chat_prompt
-from app.services.rag_evaluation_service import evaluate_rag_context
-from app.services.rag_service import get_rag_context
 from app.services.knowledge_graph_retrieval_service import (
     retrieve_graph_context,
 )
+from app.services.prompt_service import build_chat_prompt
+from app.services.rag_evaluation_service import evaluate_rag_context
+from app.services.rag_service import get_rag_context
 from app.services.retrieval_service import get_max_distance
 
 
@@ -101,7 +102,6 @@ def generate_with_ollama(
     response.raise_for_status()
 
     data = response.json()
-
     answer = data.get("response", "").strip()
 
     if not answer:
@@ -113,10 +113,8 @@ def generate_with_ollama(
 def _extract_sources(
     results: list[dict[str, Any]],
 ) -> list[SourceInfo]:
-    """Build unique structured sources from retrieved results."""
-
+    """Build unique structured sources from vector-retrieved results."""
     sources: list[SourceInfo] = []
-
     seen: set[tuple[Any, ...]] = set()
 
     for result in results:
@@ -136,7 +134,6 @@ def _extract_sources(
         page_number = metadata.get("page_number")
         chunk_index = metadata.get("chunk_index")
         distance = result.get("distance")
-
         document_id = metadata.get("document_id")
 
         source_key = (
@@ -158,10 +155,110 @@ def _extract_sources(
                 chunk_index=chunk_index,
                 distance=distance,
                 document_id=document_id,
+                evidence_type="vector",
             )
         )
 
     return sources
+
+
+def _include_graph_evidence(
+    *,
+    user_id: int,
+    query: str,
+    document_id: int | None,
+    context: str,
+    sources: list[SourceInfo],
+) -> tuple[str, list[SourceInfo]]:
+    """
+    Add supplementary graph evidence and preserve source attribution.
+
+    Graph evidence is supplementary and does not replace vector-grounding
+    evaluation. If graph retrieval fails, vector evidence remains available.
+    """
+    try:
+        graph_data = retrieve_graph_context(
+            user_id=user_id,
+            query=query,
+            document_id=document_id,
+        )
+    except Exception:
+        return context, sources
+
+    if not isinstance(graph_data, dict):
+        return context, sources
+
+    graph_context = graph_data.get("context", "")
+
+    if isinstance(graph_context, str) and graph_context.strip():
+        graph_section = (
+            "Supplementary knowledge-graph evidence "
+            "(reference material only):\n"
+            + graph_context.strip()
+        )
+
+        if graph_section not in context:
+            context = (
+                context.rstrip()
+                + "\n\n"
+                + graph_section
+            )
+
+    graph_sources = graph_data.get("sources", [])
+
+    if not isinstance(graph_sources, list):
+        return context, sources
+
+    # Evidence type is part of the key: the same document chunk may
+    # legitimately be represented by both vector and graph evidence.
+    existing_source_keys = {
+        (
+            source.get("filename"),
+            source.get("page_number"),
+            source.get("chunk_index"),
+            source.get("document_id"),
+            source.get("evidence_type", "vector"),
+        )
+        for source in sources
+    }
+
+    for graph_source in graph_sources:
+        if not isinstance(graph_source, dict):
+            continue
+
+        filename = graph_source.get("filename")
+
+        if not isinstance(filename, str) or not filename.strip():
+            continue
+
+        chunk_index = graph_source.get("chunk_index")
+        source_document_id = graph_source.get("document_id")
+
+        source_key = (
+            filename,
+            None,
+            chunk_index,
+            source_document_id,
+            "knowledge_graph",
+        )
+
+        if source_key in existing_source_keys:
+            continue
+
+        sources.append(
+            SourceInfo(
+                filename=filename,
+                page_number=None,
+                chunk_index=chunk_index,
+                distance=None,
+                evidence_type="knowledge_graph",
+                document_id=source_document_id,
+            )
+        )
+
+        existing_source_keys.add(source_key)
+
+    return context, sources
 
 
 def answer_query(
@@ -181,18 +278,32 @@ def answer_query(
     # Input validation
     # ---------------------------------------------------------
 
-    if not isinstance(user_id, int) or user_id <= 0:
+    if (
+        isinstance(user_id, bool)
+        or not isinstance(user_id, int)
+        or user_id <= 0
+    ):
         raise ValueError("user_id must be a positive integer.")
 
     if not isinstance(query, str) or not query.strip():
         raise ValueError("query must be a non-empty string.")
 
-    if not isinstance(top_k, int) or top_k <= 0:
+    if (
+        isinstance(top_k, bool)
+        or not isinstance(top_k, int)
+        or top_k <= 0
+    ):
         raise ValueError("top_k must be a positive integer.")
 
     if document_id is not None:
-        if not isinstance(document_id, int) or document_id <= 0:
-            raise ValueError("document_id must be a positive integer.")
+        if (
+            isinstance(document_id, bool)
+            or not isinstance(document_id, int)
+            or document_id <= 0
+        ):
+            raise ValueError(
+                "document_id must be a positive integer."
+            )
 
     clean_query = query.strip()
 
@@ -241,7 +352,7 @@ def answer_query(
         has_context = bool(results) or bool(context.strip())
 
     # ---------------------------------------------------------
-    # Build structured sources
+    # Build structured vector sources
     # ---------------------------------------------------------
 
     sources = _extract_sources(results)
@@ -252,7 +363,9 @@ def answer_query(
 
     if has_context_value is False:
         return {
-            "answer": "I couldn't find enough information in your documents.",
+            "answer": (
+                "I couldn't find enough information in your documents."
+            ),
             "mode": "retrieval_only",
             "sources": [],
             "results": [],
@@ -268,7 +381,9 @@ def answer_query(
 
     if not has_context:
         return {
-            "answer": "I couldn't find enough information in your documents.",
+            "answer": (
+                "I couldn't find enough information in your documents."
+            ),
             "mode": "fallback",
             "sources": [],
             "results": [],
@@ -283,10 +398,22 @@ def answer_query(
     # ---------------------------------------------------------
 
     if not use_ollama:
-        mode = "retrieval"
+        mode = (
+            "retrieval_only"
+            if has_context_value is True
+            else "retrieval"
+        )
 
+        # Preserve compatibility for legacy RAG responses that do not
+        # explicitly declare has_context=True.
         if has_context_value is True:
-            mode = "retrieval_only"
+            context, sources = _include_graph_evidence(
+                user_id=user_id,
+                query=clean_query,
+                document_id=result_document_id,
+                context=context,
+                sources=sources,
+            )
 
         return {
             "answer": (
@@ -308,6 +435,14 @@ def answer_query(
     # ---------------------------------------------------------
 
     if not is_ollama_available():
+        context, sources = _include_graph_evidence(
+            user_id=user_id,
+            query=clean_query,
+            document_id=result_document_id,
+            context=context,
+            sources=sources,
+        )
+
         return {
             "answer": (
                 "I found relevant information in your documents, "
@@ -323,7 +458,7 @@ def answer_query(
         }
 
     # ---------------------------------------------------------
-    # Evaluate grounding quality before generation
+    # Evaluate vector grounding before generation
     # ---------------------------------------------------------
 
     rag_evaluation = evaluate_rag_context(
@@ -349,57 +484,16 @@ def answer_query(
         }
 
     # ---------------------------------------------------------
-    # Retrieve supplementary knowledge-graph evidence
+    # Add supplementary graph evidence after grounding passes
     # ---------------------------------------------------------
 
-    graph_data = retrieve_graph_context(
+    context, sources = _include_graph_evidence(
         user_id=user_id,
         query=clean_query,
         document_id=result_document_id,
+        context=context,
+        sources=sources,
     )
-
-    graph_context = graph_data.get("context", "")
-    if isinstance(graph_context, str) and graph_context.strip():
-        context = (
-            context.rstrip()
-            + "\n\n"
-            + "Supplementary knowledge-graph evidence "
-              "(reference material only):\n"
-            + graph_context.strip()
-        )
-
-    existing_source_keys = {
-        (
-            source.get("filename"),
-            source.get("page_number"),
-            source.get("chunk_index"),
-            source.get("document_id"),
-        )
-        for source in sources
-    }
-
-    for graph_source in graph_data.get("sources", []):
-        source_key = (
-            graph_source.get("filename"),
-            None,
-            graph_source.get("chunk_index"),
-            graph_source.get("document_id"),
-        )
-
-        if source_key in existing_source_keys:
-            continue
-
-        sources.append(
-            SourceInfo(
-                filename=graph_source["filename"],
-                page_number=None,
-                chunk_index=graph_source.get("chunk_index"),
-                distance=None,
-                evidence_type="knowledge_graph",
-                document_id=graph_source.get("document_id"),
-            )
-        )
-        existing_source_keys.add(source_key)
 
     # ---------------------------------------------------------
     # Build Ollama prompts
