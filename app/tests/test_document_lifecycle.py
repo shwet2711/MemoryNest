@@ -1,9 +1,12 @@
 from __future__ import annotations
+
+from io import BytesIO
+from pathlib import Path
 from unittest.mock import MagicMock
 
-from pathlib import Path
-
+import fitz
 import pytest
+from PIL import Image, ImageDraw, ImageFont
 from sqlalchemy import create_engine, func
 from sqlalchemy.orm import sessionmaker
 
@@ -11,12 +14,15 @@ from app.db.database import Base
 from app.db.chunk_model import DocumentChunk
 from app.db.document_model import Document
 from app.db.embedding_model import ChunkEmbedding
+from app.db.event_model import DetectedEvent  # noqa: F401
+from app.models.user import User  # noqa: F401
 from app.services import (
     chunk_service,
     document_service,
     indexing_service,
     vector_store,
 )
+
 from io import BytesIO
 
 import fitz

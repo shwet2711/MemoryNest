@@ -71,3 +71,16 @@ def run_migrations() -> None:
             "document_id",
             "INTEGER",
         )
+
+    if "detected_events" in tables:
+        add_column_if_missing(
+            "detected_events",
+            "event_end_date",
+            "DATE",
+        )
+
+        add_column_if_missing(
+            "detected_events",
+            "date_confidence",
+            "VARCHAR(30) NOT NULL DEFAULT 'needs_review'",
+        )

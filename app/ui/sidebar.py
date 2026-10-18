@@ -18,6 +18,7 @@ def render_sidebar(cookies) -> str:
         "Documents": "Documents",
         "AI Assistant": "AI Chat",
         "Summaries": "Summaries",
+        "Events": "Events",
         "Memories": "Memories",
         "Search": "Search",
         "Knowledge Graph": "Knowledge Graph",

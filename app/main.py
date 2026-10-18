@@ -12,6 +12,7 @@ from app.ui.styles import apply_custom_css
 from app.ui.ai_chat import ai_chat_page
 from app.ui.summary import summary_page
 from app.ui.knowledge_graph import knowledge_graph_page
+from app.ui.events import events_page
 
 
 SESSION_COOKIE_NAME = "memorynest_session"
@@ -69,6 +70,8 @@ def main() -> None:
         ai_chat_page()
     elif selected_page == "Summaries":
         summary_page()
+    elif selected_page == "Events":
+        events_page()
     elif selected_page == "Knowledge Graph":
         knowledge_graph_page()
     elif selected_page == "Memories":

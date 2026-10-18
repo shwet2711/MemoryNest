@@ -268,42 +268,61 @@ def test_answer_query_allows_strong_context_to_ollama():
 
 
 
+
 def test_retrieval_only_includes_graph_evidence_and_source():
+    fake_vector = {
+        "content": "MindSync manages personal information.",
+        "metadata": {
+            "source_filename": "MindSync.docx",
+            "document_id": 6,
+            "chunk_index": 4,
+        },
+        "distance": 0.3,
+    }
+
     fake_rag = {
         "query": "What is MindSync?",
         "document_id": 6,
-        "results": [
-            {
-                "content": "MindSync manages personal information.",
-                "metadata": {
-                    "source_filename": "MindSync.docx",
-                    "document_id": 6,
-                    "chunk_index": 4,
-                },
-                "distance": 0.3,
-            }
-        ],
+        "results": [fake_vector],
         "context": "MindSync manages personal information.",
         "has_context": True,
     }
 
-    fake_graph = {
-        "available": True,
+    fake_hybrid = {
+        "results": [
+            {
+                "content": "MindSync manages personal information.",
+                "evidence_type": "vector",
+            },
+            {
+                "content": "MindSync --stores--> Memories",
+                "evidence_type": "knowledge_graph",
+            },
+        ],
         "context": (
-            "[Graph fact 1]\n"
-            "Fact: MindSync --stores--> Memories\n"
-            "Source file: MindSync.docx\n"
-            "Document ID: 6\n"
-            "Chunk: 4"
+            "[Evidence 1 — vector]\n"
+            "MindSync manages personal information.\n\n"
+            "[Evidence 2 — knowledge_graph]\n"
+            "MindSync --stores--> Memories"
         ),
         "sources": [
             {
                 "filename": "MindSync.docx",
                 "document_id": 6,
                 "chunk_index": 4,
+                "evidence_type": "vector",
+            },
+            {
+                "filename": "MindSync.docx",
+                "document_id": 6,
+                "chunk_index": 4,
                 "evidence_type": "knowledge_graph",
-            }
+            },
         ],
+        "vector_count": 1,
+        "graph_count": 1,
+        "graph_available": True,
+        "has_context": True,
     }
 
     with patch(
@@ -313,17 +332,20 @@ def test_retrieval_only_includes_graph_evidence_and_source():
         "app.services.answer_service.is_ollama_available",
         return_value=False,
     ), patch(
-        "app.services.answer_service.retrieve_graph_context",
-        return_value=fake_graph,
-    ) as graph_retrieval:
+        "app.services.answer_service.retrieve_hybrid_context",
+        return_value=fake_hybrid,
+    ) as hybrid_retrieval:
+
+        from app.services.answer_service import answer_query
+
         result = answer_query(
             user_id=1,
             query="What is MindSync?",
             document_id=6,
-            use_ollama=False,
+            use_ollama=True,
         )
 
-    assert "Supplementary knowledge-graph evidence" in result["context"]
+    assert result["mode"] == "retrieval_only"
     assert "MindSync --stores--> Memories" in result["context"]
     assert any(
         source.get("evidence_type") == "knowledge_graph"
@@ -331,26 +353,30 @@ def test_retrieval_only_includes_graph_evidence_and_source():
     )
     assert result["document_id"] == 6
 
-    graph_retrieval.assert_called_once_with(
+    hybrid_retrieval.assert_called_once_with(
         user_id=1,
         query="What is MindSync?",
+        top_k=5,
         document_id=6,
+        vector_results=[fake_vector],
     )
 
 
+
+
 def test_graph_failure_does_not_break_retrieval_only_answer():
+    fake_vector = {
+        "content": "MindSync manages personal information.",
+        "metadata": {
+            "source_filename": "MindSync.docx",
+            "chunk_index": 4,
+        },
+        "distance": 0.3,
+    }
+
     fake_rag = {
         "query": "What is MindSync?",
-        "results": [
-            {
-                "content": "MindSync manages personal information.",
-                "metadata": {
-                    "source_filename": "MindSync.docx",
-                    "chunk_index": 4,
-                },
-                "distance": 0.3,
-            }
-        ],
+        "results": [fake_vector],
         "context": "MindSync manages personal information.",
         "has_context": True,
     }
@@ -362,13 +388,16 @@ def test_graph_failure_does_not_break_retrieval_only_answer():
         "app.services.answer_service.is_ollama_available",
         return_value=False,
     ), patch(
-        "app.services.answer_service.retrieve_graph_context",
+        "app.services.answer_service.retrieve_hybrid_context",
         side_effect=RuntimeError("Graph service unavailable"),
-    ):
+    ) as hybrid_retrieval:
+
+        from app.services.answer_service import answer_query
+
         result = answer_query(
             user_id=1,
             query="What is MindSync?",
-            use_ollama=False,
+            use_ollama=True,
         )
 
     assert result["mode"] == "retrieval_only"
@@ -381,3 +410,5 @@ def test_graph_failure_does_not_break_retrieval_only_answer():
         source.get("evidence_type") == "knowledge_graph"
         for source in result["sources"]
     )
+
+    hybrid_retrieval.assert_called_once()

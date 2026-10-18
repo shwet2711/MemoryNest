@@ -8,9 +8,7 @@ import requests
 from dotenv import load_dotenv
 
 from app.core.config import RAG_GROUNDING_DISTANCE
-from app.services.knowledge_graph_retrieval_service import (
-    retrieve_graph_context,
-)
+from app.services.hybrid_retrieval_service import retrieve_hybrid_context
 from app.services.prompt_service import build_chat_prompt
 from app.services.rag_evaluation_service import evaluate_rag_context
 from app.services.rag_service import get_rag_context
@@ -28,14 +26,8 @@ class SourceInfo(dict):
     """
     Structured source information.
 
-    Behaves like a normal dictionary for the UI:
-
-        source["filename"]
-
-    and also compares equal to its filename for compatibility with
-    existing MemoryNest tests:
-
-        "MindSync.docx" in sources
+    Supports dictionary access and filename comparisons for
+    compatibility with existing MemoryNest code and tests.
     """
 
     def __eq__(self, other: object) -> bool:
@@ -162,55 +154,55 @@ def _extract_sources(
     return sources
 
 
-def _include_graph_evidence(
+def _include_hybrid_evidence(
     *,
     user_id: int,
     query: str,
     document_id: int | None,
+    top_k: int,
+    vector_results: list[dict[str, Any]],
     context: str,
     sources: list[SourceInfo],
-) -> tuple[str, list[SourceInfo]]:
+) -> tuple[str, list[SourceInfo], list[dict[str, Any]]]:
     """
-    Add supplementary graph evidence and preserve source attribution.
+    Fuse previously retrieved vector results with graph evidence.
 
-    Graph evidence is supplementary and does not replace vector-grounding
-    evaluation. If graph retrieval fails, vector evidence remains available.
+    Reuses vector results to avoid repeating vector retrieval.
+    This function does not evaluate or change vector grounding.
     """
     try:
-        graph_data = retrieve_graph_context(
+        hybrid_data = retrieve_hybrid_context(
             user_id=user_id,
             query=query,
+            top_k=top_k,
             document_id=document_id,
+            vector_results=vector_results,
         )
     except Exception:
-        return context, sources
+        # Hybrid retrieval is supplementary. Preserve normal RAG behavior
+        # if the hybrid service unexpectedly fails.
+        return context, sources, []
 
-    if not isinstance(graph_data, dict):
-        return context, sources
+    if not isinstance(hybrid_data, dict):
+        return context, sources, []
 
-    graph_context = graph_data.get("context", "")
+    hybrid_context = hybrid_data.get("context")
 
-    if isinstance(graph_context, str) and graph_context.strip():
-        graph_section = (
-            "Supplementary knowledge-graph evidence "
-            "(reference material only):\n"
-            + graph_context.strip()
-        )
+    if isinstance(hybrid_context, str) and hybrid_context.strip():
+        context = hybrid_context
 
-        if graph_section not in context:
-            context = (
-                context.rstrip()
-                + "\n\n"
-                + graph_section
-            )
+    hybrid_results = hybrid_data.get("results", [])
 
-    graph_sources = graph_data.get("sources", [])
+    if not isinstance(hybrid_results, list):
+        hybrid_results = []
 
-    if not isinstance(graph_sources, list):
-        return context, sources
+    hybrid_sources = hybrid_data.get("sources", [])
 
-    # Evidence type is part of the key: the same document chunk may
-    # legitimately be represented by both vector and graph evidence.
+    if not isinstance(hybrid_sources, list):
+        hybrid_sources = []
+
+    # Keep detailed vector sources, including page and distance metadata.
+    # Add supplementary Knowledge Graph sources without duplicating them.
     existing_source_keys = {
         (
             source.get("filename"),
@@ -222,21 +214,32 @@ def _include_graph_evidence(
         for source in sources
     }
 
-    for graph_source in graph_sources:
-        if not isinstance(graph_source, dict):
+    for hybrid_source in hybrid_sources:
+        if not isinstance(hybrid_source, dict):
             continue
 
-        filename = graph_source.get("filename")
+        evidence_type = hybrid_source.get("evidence_type")
+
+        if evidence_type == "vector":
+            # Vector sources were already extracted from the original
+            # RAG results and retain their detailed metadata.
+            continue
+
+        if evidence_type != "knowledge_graph":
+            continue
+
+        filename = hybrid_source.get("filename")
 
         if not isinstance(filename, str) or not filename.strip():
             continue
 
-        chunk_index = graph_source.get("chunk_index")
-        source_document_id = graph_source.get("document_id")
+        page_number = None
+        chunk_index = hybrid_source.get("chunk_index")
+        source_document_id = hybrid_source.get("document_id")
 
         source_key = (
             filename,
-            None,
+            page_number,
             chunk_index,
             source_document_id,
             "knowledge_graph",
@@ -248,17 +251,17 @@ def _include_graph_evidence(
         sources.append(
             SourceInfo(
                 filename=filename,
-                page_number=None,
+                page_number=page_number,
                 chunk_index=chunk_index,
                 distance=None,
-                evidence_type="knowledge_graph",
                 document_id=source_document_id,
+                evidence_type="knowledge_graph",
             )
         )
 
         existing_source_keys.add(source_key)
 
-    return context, sources
+    return context, sources, hybrid_results
 
 
 def answer_query(
@@ -272,6 +275,9 @@ def answer_query(
     """
     Retrieve relevant document context and optionally generate
     an answer using the local Ollama model.
+
+    Grounding is evaluated against the original vector evidence before
+    supplementary Knowledge Graph evidence is used for generation.
     """
 
     # ---------------------------------------------------------
@@ -308,7 +314,7 @@ def answer_query(
     clean_query = query.strip()
 
     # ---------------------------------------------------------
-    # Retrieve RAG context
+    # Retrieve original RAG context
     # ---------------------------------------------------------
 
     rag_data = get_rag_context(
@@ -404,13 +410,17 @@ def answer_query(
             else "retrieval"
         )
 
-        # Preserve compatibility for legacy RAG responses that do not
-        # explicitly declare has_context=True.
+        hybrid_results: list[dict[str, Any]] = []
+
+        # Preserve legacy behavior for responses that do not explicitly
+        # declare has_context=True.
         if has_context_value is True:
-            context, sources = _include_graph_evidence(
+            context, sources, hybrid_results = _include_hybrid_evidence(
                 user_id=user_id,
                 query=clean_query,
                 document_id=result_document_id,
+                top_k=top_k,
+                vector_results=results,
                 context=context,
                 sources=sources,
             )
@@ -424,6 +434,7 @@ def answer_query(
             "mode": mode,
             "sources": sources,
             "results": results,
+            "hybrid_results": hybrid_results,
             "context": context,
             "document_id": result_document_id,
             "top_k": result_top_k,
@@ -434,11 +445,15 @@ def answer_query(
     # Context exists but Ollama is unavailable
     # ---------------------------------------------------------
 
+    # Preserve retrieval-only behavior when the local model is offline.
+    # No generated answer is produced in this branch.
     if not is_ollama_available():
-        context, sources = _include_graph_evidence(
+        context, sources, hybrid_results = _include_hybrid_evidence(
             user_id=user_id,
             query=clean_query,
             document_id=result_document_id,
+            top_k=top_k,
+            vector_results=results,
             context=context,
             sources=sources,
         )
@@ -451,6 +466,7 @@ def answer_query(
             "mode": "retrieval_only",
             "sources": sources,
             "results": results,
+            "hybrid_results": hybrid_results,
             "context": context,
             "document_id": result_document_id,
             "top_k": result_top_k,
@@ -458,9 +474,11 @@ def answer_query(
         }
 
     # ---------------------------------------------------------
-    # Evaluate vector grounding before generation
+    # Evaluate vector grounding before Ollama generation
     # ---------------------------------------------------------
 
+    # Only the original vector results and vector context are evaluated.
+    # Knowledge Graph evidence cannot make weak grounding pass.
     rag_evaluation = evaluate_rag_context(
         results=results,
         context=context,
@@ -484,13 +502,15 @@ def answer_query(
         }
 
     # ---------------------------------------------------------
-    # Add supplementary graph evidence after grounding passes
+    # Add hybrid evidence after grounding passes
     # ---------------------------------------------------------
 
-    context, sources = _include_graph_evidence(
+    context, sources, hybrid_results = _include_hybrid_evidence(
         user_id=user_id,
         query=clean_query,
         document_id=result_document_id,
+        top_k=top_k,
+        vector_results=results,
         context=context,
         sources=sources,
     )
@@ -519,6 +539,7 @@ def answer_query(
             "mode": "ollama",
             "sources": sources,
             "results": results,
+            "hybrid_results": hybrid_results,
             "context": context,
             "document_id": result_document_id,
             "top_k": result_top_k,
@@ -535,6 +556,7 @@ def answer_query(
             "mode": "retrieval_only",
             "sources": sources,
             "results": results,
+            "hybrid_results": hybrid_results,
             "context": context,
             "document_id": result_document_id,
             "top_k": result_top_k,

@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+import logging
+from pathlib import Path
 
 import streamlit as st
 
@@ -6,20 +10,23 @@ from app.services.chunk_service import (
     get_document_chunks,
     process_document_chunks,
 )
-from app.services.indexing_service import index_document
 from app.services.document_service import (
     create_document,
     delete_document,
     get_user_documents,
 )
+from app.services.event_service import scan_document_for_events
+from app.services.indexing_service import index_document
 from app.ui.components import (
     render_footer,
     render_section_header,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def format_file_size(size: int) -> str:
-    """Convert file size from bytes to a readable format."""
+    """Convert file size to a readable format."""
 
     if size < 1024:
         return f"{size} B"
@@ -42,73 +49,48 @@ def file_icon(file_type: str) -> str:
         "png": "🖼️",
     }
 
-    return icons.get(
-        file_type.lower(),
-        "📄",
-    )
+    return icons.get(file_type.lower(), "📄")
 
 
 def status_message(status: str) -> None:
     """Display a document extraction status."""
 
     if status == "completed":
-
-        st.success(
-            "Text extracted",
-            icon="✅",
-        )
+        st.success("Text extracted", icon="✅")
 
     elif status == "ocr_required":
-
-        st.info(
-            "OCR required",
-            icon="ℹ️",
-        )
+        st.info("OCR required", icon="ℹ️")
 
     elif status == "processing":
-
-        st.warning(
-            "Processing",
-            icon="⏳",
-        )
+        st.warning("Processing", icon="⏳")
 
     else:
-
-        st.error(
-            "Extraction failed",
-            icon="❌",
-        )
+        st.error("Extraction failed", icon="❌")
 
 
 def render_text_preview(document) -> None:
     """Display extracted text for a document."""
 
     if not document.extracted_text_path:
-
         st.info(
             "No extracted text is available yet.",
             icon="ℹ️",
         )
-
         return
 
     try:
-
         with open(
             document.extracted_text_path,
             "r",
             encoding="utf-8",
         ) as file:
-
             text = file.read()
 
         if not text.strip():
-
             st.info(
                 "The extracted text is empty.",
                 icon="ℹ️",
             )
-
             return
 
         st.text_area(
@@ -119,19 +101,19 @@ def render_text_preview(document) -> None:
             key=f"text_preview_{document.id}",
         )
 
-        st.caption(
-            f"{len(text):,} characters extracted"
-        )
+        st.caption(f"{len(text):,} characters extracted")
 
     except FileNotFoundError:
-
         st.error(
             "The extracted text file could not be found.",
             icon="❌",
         )
 
     except Exception as error:
-
+        logger.exception(
+            "Failed to preview extracted text for document %s",
+            document.id,
+        )
         st.error(
             f"Unable to read extracted text: {error}",
             icon="❌",
@@ -152,17 +134,11 @@ def render_chunk_preview(
     )
 
     if not chunks:
-
         st.info(
             "No chunks have been created for this document yet.",
             icon="ℹ️",
         )
-
         return
-
-    # ---------------------------------------------------------
-    # CHUNK STATISTICS
-    # ---------------------------------------------------------
 
     lengths = [
         chunk.character_count
@@ -174,45 +150,25 @@ def render_chunk_preview(
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
-        st.metric(
-            "Chunks",
-            len(chunks),
-        )
+        st.metric("Chunks", len(chunks))
 
     with col2:
-        st.metric(
-            "Average",
-            f"{average_length:.0f}",
-        )
+        st.metric("Average", f"{average_length:.0f}")
 
     with col3:
-        st.metric(
-            "Minimum",
-            min(lengths),
-        )
+        st.metric("Minimum", min(lengths))
 
     with col4:
-        st.metric(
-            "Maximum",
-            max(lengths),
-        )
+        st.metric("Maximum", max(lengths))
 
     st.write("")
 
-    # ---------------------------------------------------------
-    # CHUNK LIST
-    # ---------------------------------------------------------
-
     for chunk in chunks:
-
         with st.expander(
             f"Chunk {chunk.chunk_index + 1} · "
             f"{chunk.character_count:,} characters"
         ):
-
-            st.caption(
-                f"Source: {chunk.source_filename}"
-            )
+            st.caption(f"Source: {chunk.source_filename}")
 
             st.text_area(
                 "Chunk content",
@@ -229,12 +185,7 @@ def documents_page() -> None:
     user_id = st.session_state.get("user_id")
 
     if not user_id:
-
-        st.error(
-            "Please sign in again.",
-            icon="❌",
-        )
-
+        st.error("Please sign in again.", icon="❌")
         return
 
     # ---------------------------------------------------------
@@ -277,7 +228,6 @@ def documents_page() -> None:
     )
 
     if uploaded_files:
-
         st.write("")
 
         st.caption(
@@ -285,31 +235,30 @@ def documents_page() -> None:
         )
 
         if st.button(
-            "⬆️  Process Selected Documents",
+            "⬆️ Process Selected Documents",
             type="primary",
             use_container_width=True,
         ):
-
             db = SessionLocal()
 
             successful = 0
             failed = 0
+            total = len(uploaded_files)
+
+            progress = st.progress(
+                0,
+                text="Preparing documents...",
+            )
 
             try:
-
-                progress = st.progress(
-                    0,
-                    text="Preparing documents...",
-                )
-
-                total = len(uploaded_files)
-
                 for index, uploaded_file in enumerate(
                     uploaded_files,
                     start=1,
                 ):
-
                     try:
+                        # -------------------------------------
+                        # CREATE AND EXTRACT DOCUMENT
+                        # -------------------------------------
 
                         file_bytes = uploaded_file.getvalue()
 
@@ -320,11 +269,19 @@ def documents_page() -> None:
                             file_bytes=file_bytes,
                         )
 
+                        # -------------------------------------
+                        # CREATE CHUNKS
+                        # -------------------------------------
+
                         process_document_chunks(
                             db=db,
                             document=document,
                             user_id=user_id,
                         )
+
+                        # -------------------------------------
+                        # INDEX DOCUMENT
+                        # -------------------------------------
 
                         index_document(
                             db=db,
@@ -332,49 +289,97 @@ def documents_page() -> None:
                             user_id=user_id,
                         )
 
+                        # -------------------------------------
+                        # AUTOMATIC EVENT DETECTION
+                        # -------------------------------------
+
+                        if (
+                            document.extraction_status == "completed"
+                            and document.extracted_text_path
+                            and Path(
+                                document.extracted_text_path
+                            ).is_file()
+                        ):
+                            try:
+                                detected_events = (
+                                    scan_document_for_events(
+                                        db=db,
+                                        user_id=user_id,
+                                        document_id=document.id,
+                                    )
+                                )
+
+                                if detected_events:
+                                    st.info(
+                                        f"{uploaded_file.name}: "
+                                        f"{len(detected_events)} "
+                                        "event(s) detected. "
+                                        "Review them on the Events page."
+                                    )
+
+                            except Exception:
+                                logger.exception(
+                                    "Automatic event detection failed "
+                                    "for document %s (user %s)",
+                                    document.id,
+                                    user_id,
+                                )
+
+                                st.warning(
+                                    f"{uploaded_file.name} was processed "
+                                    "successfully, but automatic event "
+                                    "detection failed. You can still "
+                                    "use the document."
+                                )
+
                         successful += 1
 
-                        progress.progress(
-                            index / total,
-                            text=(
-                                f"Processed "
-                                f"{uploaded_file.name}"
-                            ),
-                        )
-
                     except Exception as error:
-
                         failed += 1
+
+                        logger.exception(
+                            "Failed to process uploaded document %s "
+                            "for user %s",
+                            uploaded_file.name,
+                            user_id,
+                        )
 
                         st.error(
                             f"{uploaded_file.name}: {error}",
                             icon="❌",
                         )
 
-                progress.empty()
-
-                if successful:
-
-                    st.success(
-                        f"{successful} document(s) "
-                        "processed successfully.",
-                        icon="✅",
-                    )
-
-                if failed:
-
-                    st.warning(
-                        f"{failed} document(s) "
-                        "could not be processed.",
-                        icon="⚠️",
-                    )
-
-                if successful:
-                    st.rerun()
+                    finally:
+                        progress.progress(
+                            index / total,
+                            text=(
+                                f"Processed {index} of {total} "
+                                "document(s)"
+                            ),
+                        )
 
             finally:
-
+                progress.empty()
                 db.close()
+
+            # ---------------------------------------------
+            # PROCESSING SUMMARY
+            # ---------------------------------------------
+
+            if successful:
+                st.success(
+                    f"{successful} document(s) processed successfully.",
+                    icon="✅",
+                )
+
+            if failed:
+                st.warning(
+                    f"{failed} document(s) could not be processed. "
+                    "Check the error messages above.",
+                    icon="⚠️",
+                )
+            if successful:
+                st.rerun()
 
     st.divider()
 
@@ -390,7 +395,6 @@ def documents_page() -> None:
     db = SessionLocal()
 
     try:
-
         documents = get_user_documents(
             db=db,
             user_id=user_id,
@@ -401,12 +405,8 @@ def documents_page() -> None:
         # -----------------------------------------------------
 
         if not documents:
-
             with st.container(border=True):
-
-                st.markdown(
-                    "### 📚 Your knowledge base is empty"
-                )
+                st.markdown("### 📚 Your knowledge base is empty")
 
                 st.caption(
                     "Upload your first document above. "
@@ -415,12 +415,9 @@ def documents_page() -> None:
                 )
 
             render_footer()
-
             return
 
-        st.caption(
-            f"{len(documents)} document(s) stored"
-        )
+        st.caption(f"{len(documents)} document(s) stored")
 
         st.write("")
 
@@ -429,9 +426,7 @@ def documents_page() -> None:
         # -----------------------------------------------------
 
         for document in documents:
-
             with st.container(border=True):
-
                 col1, col2, col3 = st.columns(
                     [0.10, 0.65, 0.25]
                 )
@@ -441,7 +436,6 @@ def documents_page() -> None:
                 # ---------------------------------------------
 
                 with col1:
-
                     st.markdown(
                         f"## {file_icon(document.file_type)}"
                     )
@@ -451,7 +445,6 @@ def documents_page() -> None:
                 # ---------------------------------------------
 
                 with col2:
-
                     st.markdown(
                         f"### {document.original_filename}"
                     )
@@ -461,22 +454,18 @@ def documents_page() -> None:
                         f"{format_file_size(document.file_size)}"
                     )
 
-                    status_message(
-                        document.extraction_status
-                    )
+                    status_message(document.extraction_status)
 
                 # ---------------------------------------------
                 # ACTIONS
                 # ---------------------------------------------
 
                 with col3:
-
                     if st.button(
                         "👁️ Preview Text",
                         key=f"preview_{document.id}",
                         use_container_width=True,
                     ):
-
                         st.session_state[
                             f"show_text_{document.id}"
                         ] = not st.session_state.get(
@@ -485,19 +474,13 @@ def documents_page() -> None:
                         )
 
                     if document.extraction_status == "completed":
-
                         if st.button(
                             "🧩 Create Chunks",
                             key=f"chunk_{document.id}",
                             use_container_width=True,
                         ):
-
                             try:
-
-                                with st.spinner(
-                                    "Creating chunks..."
-                                ):
-
+                                with st.spinner("Creating chunks..."):
                                     chunks = process_document_chunks(
                                         db=db,
                                         document=document,
@@ -514,6 +497,11 @@ def documents_page() -> None:
                                 ] = True
 
                             except Exception as error:
+                                logger.exception(
+                                    "Chunk creation failed for "
+                                    "document %s",
+                                    document.id,
+                                )
 
                                 st.error(
                                     f"Chunking failed: {error}",
@@ -525,7 +513,6 @@ def documents_page() -> None:
                         key=f"delete_{document.id}",
                         use_container_width=True,
                     ):
-
                         deleted = delete_document(
                             db=db,
                             user_id=user_id,
@@ -533,16 +520,13 @@ def documents_page() -> None:
                         )
 
                         if deleted:
-
                             st.success(
                                 "Document deleted.",
                                 icon="✅",
                             )
-
                             st.rerun()
 
                         else:
-
                             st.error(
                                 "Document could not be deleted.",
                                 icon="❌",
@@ -556,16 +540,11 @@ def documents_page() -> None:
                     f"show_text_{document.id}",
                     False,
                 ):
-
                     st.divider()
 
-                    st.markdown(
-                        "#### Extracted Text"
-                    )
+                    st.markdown("#### Extracted Text")
 
-                    render_text_preview(
-                        document
-                    )
+                    render_text_preview(document)
 
                 # ---------------------------------------------
                 # CHUNK PREVIEW
@@ -575,12 +554,9 @@ def documents_page() -> None:
                     f"show_chunks_{document.id}",
                     False,
                 ):
-
                     st.divider()
 
-                    st.markdown(
-                        "#### Document Chunks"
-                    )
+                    st.markdown("#### Document Chunks")
 
                     render_chunk_preview(
                         db=db,
@@ -591,5 +567,4 @@ def documents_page() -> None:
         render_footer()
 
     finally:
-
         db.close()

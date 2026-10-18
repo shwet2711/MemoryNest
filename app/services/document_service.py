@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.db.chunk_model import DocumentChunk
 from app.db.document_model import Document
 from app.db.embedding_model import ChunkEmbedding
+from app.db.event_model import DetectedEvent
 from app.services.ocr_service import (
     extract_image_text,
     extract_image_text_with_confidence,
@@ -574,6 +575,21 @@ def delete_document(
 
     for record in embedding_records:
         db.delete(record)
+
+    # Delete events belonging to this user and document.
+    events = (
+        db.query(DetectedEvent)
+        .filter(
+            DetectedEvent.document_id == document_id,
+            DetectedEvent.user_id == user_id,
+        )
+        .all()
+    )
+
+    for event in events:
+        db.delete(event)
+
+    # Delete the document after its dependent records.
     db.delete(document)
 
     # Commit database changes before removing local files.
