@@ -15,6 +15,7 @@ from app.db.chunk_model import DocumentChunk
 from app.db.document_model import Document
 from app.db.embedding_model import ChunkEmbedding
 from app.db.event_model import DetectedEvent
+from app.db.knowledge_graph_sync_model import KnowledgeGraphSyncJob
 from app.services.ocr_service import (
     extract_image_text,
     extract_image_text_with_confidence,
@@ -26,6 +27,9 @@ import logging
 from app.core.config import NEO4J_ENABLED
 from app.services.knowledge_graph_service import (
     delete_document_relationships,
+)
+from app.services.knowledge_graph_sync_service import (
+    enqueue_delete_job,
 )
 from app.services.vector_store import delete_document_embeddings
 
@@ -540,7 +544,12 @@ def delete_document(
     user_id: int,
     document_id: int,
 ) -> bool:
-    """Delete a user's document and attempt related data cleanup."""
+    """
+    Delete a user's document and persist Knowledge Graph cleanup.
+
+    The graph cleanup job is committed with the relational deletion.
+    If Neo4j is unavailable, the job remains pending for the worker.
+    """
 
     document = get_document(
         db,
@@ -551,7 +560,24 @@ def delete_document(
     if document is None:
         return False
 
-    # Delete document chunks from the relational database.
+    # Queue graph cleanup before deleting the document.
+    # If queueing fails, preserve the document and its related records.
+    try:
+        enqueue_delete_job(
+            db,
+            user_id=user_id,
+            document_id=document_id,
+        )
+        db.flush()
+    except Exception:
+        db.rollback()
+        logger.exception(
+            "Could not queue graph cleanup for document %s, user %s",
+            document_id,
+            user_id,
+        )
+        raise
+
     chunks = (
         db.query(DocumentChunk)
         .filter(
@@ -576,7 +602,6 @@ def delete_document(
     for record in embedding_records:
         db.delete(record)
 
-    # Delete events belonging to this user and document.
     events = (
         db.query(DetectedEvent)
         .filter(
@@ -589,13 +614,12 @@ def delete_document(
     for event in events:
         db.delete(event)
 
-    # Delete the document after its dependent records.
     db.delete(document)
 
-    # Commit database changes before removing local files.
+    # Commit document deletion and the graph cleanup job together.
     db.commit()
 
-    # Remove embeddings belonging to this user and document.
+    # Vector cleanup is independent of Neo4j.
     try:
         delete_document_embeddings(
             document_id=document_id,
@@ -608,22 +632,39 @@ def delete_document(
             user_id,
         )
 
-    # Neo4j is optional; don't connect when it is disabled.
+    # Try graph cleanup immediately. If it fails, retain the queued job.
     if NEO4J_ENABLED:
         try:
             delete_document_relationships(
                 user_id=user_id,
                 document_id=document_id,
             )
+
+            delete_job = (
+                db.query(KnowledgeGraphSyncJob)
+                .filter(
+                    KnowledgeGraphSyncJob.user_id == user_id,
+                    KnowledgeGraphSyncJob.document_id == document_id,
+                    KnowledgeGraphSyncJob.operation == "delete",
+                )
+                .first()
+            )
+
+            if delete_job is not None:
+                delete_job.status = "completed"
+                delete_job.last_error = None
+                db.commit()
+
         except Exception:
+            db.rollback()
             logger.exception(
-                "Failed to delete graph relationships for "
-                "document %s, user %s",
+                "Immediate graph cleanup failed for document %s, user %s. "
+                "The queued cleanup job will be retried.",
                 document_id,
                 user_id,
             )
 
-    # Remove local files only after the database commit.
+    # Remove local files only after the relational commit.
     paths_to_remove = [
         Path(document.file_path),
         CHUNK_OUTPUT_DIR / f"document_{document.id}_chunks.txt",

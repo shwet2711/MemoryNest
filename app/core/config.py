@@ -114,3 +114,39 @@ if NEO4J_ENABLED:
 UPLOAD_DIRECTORY.mkdir(parents=True, exist_ok=True)
 PROCESSED_DIRECTORY.mkdir(parents=True, exist_ok=True)
 CHROMA_PERSIST_DIRECTORY.mkdir(parents=True, exist_ok=True)
+
+
+# Optional Google Calendar integration.
+GOOGLE_OAUTH_CLIENT_ID = os.getenv(
+    "GOOGLE_OAUTH_CLIENT_ID",
+    "",
+).strip()
+
+GOOGLE_OAUTH_CLIENT_SECRET = os.getenv(
+    "GOOGLE_OAUTH_CLIENT_SECRET",
+    "",
+).strip()
+
+GOOGLE_OAUTH_REDIRECT_URI = os.getenv(
+    "GOOGLE_OAUTH_REDIRECT_URI",
+    "http://localhost:8501",
+).strip()
+
+MEMORYNEST_TOKEN_ENCRYPTION_KEY = os.getenv(
+    "MEMORYNEST_TOKEN_ENCRYPTION_KEY",
+    "",
+).strip()
+
+# Optional SMTP settings for notification email delivery.
+SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USERNAME = os.getenv("SMTP_USERNAME", "").strip()
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+SMTP_FROM_EMAIL = os.getenv("SMTP_FROM_EMAIL", "").strip()
+SMTP_USE_SSL = os.getenv("SMTP_USE_SSL", "False").strip().lower() in {
+    "true", "1", "yes", "on"
+}
+SMTP_USE_STARTTLS = os.getenv(
+    "SMTP_USE_STARTTLS", "True"
+).strip().lower() in {"true", "1", "yes", "on"}
+SMTP_TIMEOUT_SECONDS = float(os.getenv("SMTP_TIMEOUT_SECONDS", "20"))

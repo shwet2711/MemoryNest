@@ -1,4 +1,4 @@
-
+﻿
 from sqlalchemy import inspect, text
 
 from app.db.database import engine
@@ -83,4 +83,18 @@ def run_migrations() -> None:
             "detected_events",
             "date_confidence",
             "VARCHAR(30) NOT NULL DEFAULT 'needs_review'",
+        )
+
+    if "gmail_connections" in tables:
+        add_column_if_missing(
+            "gmail_connections",
+            "reauthorization_required",
+            "BOOLEAN NOT NULL DEFAULT 0",
+        )
+
+    if "google_calendar_connections" in tables:
+        add_column_if_missing(
+            "google_calendar_connections",
+            "reauthorization_required",
+            "BOOLEAN NOT NULL DEFAULT 0",
         )

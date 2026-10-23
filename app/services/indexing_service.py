@@ -8,23 +8,23 @@ from sqlalchemy.orm import Session
 from app.core.config import NEO4J_ENABLED
 from app.db.chunk_model import DocumentChunk
 from app.db.embedding_model import ChunkEmbedding
-
 from app.services.embedding_config import get_embedding_model_name
 from app.services.embedding_service import (
     generate_embeddings,
     get_embedding_dimension,
 )
-
-from app.services.vector_store import (
-    add_embeddings,
-    delete_embedding,
-)
-
 from app.services.knowledge_graph_pipeline_service import (
     process_chunk_for_knowledge_graph,
 )
 from app.services.knowledge_graph_service import check_neo4j_connection
-
+from app.services.knowledge_graph_sync_service import (
+    enqueue_sync_job,
+    mark_sync_job_completed,
+)
+from app.services.vector_store import (
+    add_embeddings,
+    delete_embedding,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,11 +38,12 @@ def index_document(
     """
     Index document chunks in ChromaDB and synchronize SQLite metadata.
 
-    When Neo4j is enabled and available, also process reliable chunks
-    for the optional knowledge graph. Low-confidence OCR chunks remain
-    searchable but are skipped during graph processing.
+    All chunks remain available for vector search, including low-confidence
+    OCR chunks. Unreliable OCR chunks are excluded from graph processing.
 
-    Graph failures do not undo successful vector indexing.
+    Graph work is queued for retry when Neo4j is disabled or unavailable,
+    or when any reliable chunk fails graph processing. Graph failures do
+    not undo successful vector indexing.
     """
 
     if (
@@ -100,16 +101,13 @@ def index_document(
 
     model_name = get_embedding_model_name()
     dimension = get_embedding_dimension()
-
     indexed_count = 0
 
-    # Preserve the existing vector-indexing workflow.
-    # All chunks remain available for semantic search, including OCR
-    # text that has been flagged as low-confidence.
+    # Preserve vector indexing independently of graph availability.
+    # Low-confidence OCR chunks must remain searchable.
     for start in range(0, len(chunks), batch_size):
         batch = chunks[start:start + batch_size]
         texts = [chunk.content for chunk in batch]
-
         vectors = generate_embeddings(texts)
         vector_ids = [f"chunk_{chunk.id}" for chunk in batch]
 
@@ -172,7 +170,6 @@ def index_document(
     if stale_records:
         db.commit()
 
-    # Report graph processing separately from vector indexing.
     graph_result = {
         "knowledge_graph_status": "disabled",
         "knowledge_graph_processed_chunks": 0,
@@ -180,6 +177,9 @@ def index_document(
         "knowledge_graph_skipped_low_confidence_chunks": 0,
         "knowledge_graph_relationships_stored": 0,
     }
+
+    # Queue work when immediate graph synchronization is not possible.
+    queue_graph_sync = not NEO4J_ENABLED
 
     if NEO4J_ENABLED:
         try:
@@ -194,7 +194,9 @@ def index_document(
                 "Neo4j is unavailable.",
                 document_id,
             )
+
             graph_result["knowledge_graph_status"] = "unavailable"
+            queue_graph_sync = True
 
         else:
             processed_count = 0
@@ -208,10 +210,7 @@ def index_document(
                     or "text"
                 )
 
-                # Skip unreliable OCR before graph processing.
-                # In particular, do not call the relationship
-                # replacement pipeline for these chunks, because
-                # an empty extraction could remove existing links.
+                # Never replace relationships for unreliable OCR chunks.
                 if extraction_method == "ocr_low_confidence":
                     skipped_count += 1
 
@@ -265,6 +264,52 @@ def index_document(
                     relationship_count
                 ),
             }
+
+            if failed_count > 0:
+                queue_graph_sync = True
+
+    # Persist retry work or resolve an existing sync job.
+    if queue_graph_sync:
+        try:
+            enqueue_sync_job(
+                db,
+                user_id=user_id,
+                document_id=document_id,
+                reset_completed=True,
+            )
+            db.commit()
+
+        except Exception:
+            db.rollback()
+
+            logger.exception(
+                "Failed to queue knowledge graph synchronization "
+                "for document %s, user %s.",
+                document_id,
+                user_id,
+            )
+
+    elif graph_result["knowledge_graph_status"] in {
+        "completed",
+        "skipped_low_confidence",
+    }:
+        try:
+            mark_sync_job_completed(
+                db,
+                user_id=user_id,
+                document_id=document_id,
+            )
+            db.commit()
+
+        except Exception:
+            db.rollback()
+
+            logger.exception(
+                "Failed to mark knowledge graph synchronization "
+                "completed for document %s, user %s.",
+                document_id,
+                user_id,
+            )
 
     return {
         "document_id": document_id,

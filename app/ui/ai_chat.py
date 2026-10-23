@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from typing import Any
 
@@ -284,7 +284,7 @@ def _select_conversation(conversation_id: int) -> None:
 
 
 def _create_new_chat() -> None:
-    """Create a fresh conversation."""
+    """Start a fresh chat without persisting an empty conversation."""
 
     user_id = st.session_state.get("user_id")
 
@@ -294,18 +294,11 @@ def _create_new_chat() -> None:
         )
         return
 
-    conversation = create_conversation(
-        user_id=int(user_id),
-        title="New Conversation",
-        document_id=None,
-    )
-
-    st.session_state.ai_chat_conversation_id = int(
-        conversation["id"]
-    )
-
+    # Keep the new chat in session state until its first question.
+    st.session_state.ai_chat_conversation_id = None
     st.session_state.ai_chat_document_id = None
     st.session_state.ai_chat_messages = []
+    st.session_state.ai_chat_scope_selector = "All Documents"
 
     _load_conversations()
 
@@ -492,6 +485,23 @@ def _render_chat_controls() -> None:
     """Render the AI Chat control panel."""
 
     st.markdown(
+        '<div class="mn-section-label">Knowledge Scope</div>',
+        unsafe_allow_html=True,
+    )
+
+    _render_document_scope()
+
+    st.slider(
+        "Retrieved passages",
+        min_value=1,
+        max_value=10,
+        key="ai_chat_top_k",
+        label_visibility="collapsed",
+    )
+
+    st.divider()
+
+    st.markdown(
         '<div class="mn-section-label">Conversation</div>',
         unsafe_allow_html=True,
     )
@@ -507,34 +517,6 @@ def _render_chat_controls() -> None:
     st.write("")
 
     _render_conversation_list()
-
-    st.divider()
-
-    st.markdown(
-        '<div class="mn-section-label">Knowledge Scope</div>',
-        unsafe_allow_html=True,
-    )
-
-    _render_document_scope()
-
-    st.slider(
-        "Retrieved passages",
-        min_value=1,
-        max_value=10,
-        value=int(
-            st.session_state.ai_chat_top_k
-        ),
-        key="ai_chat_top_k",
-        help=(
-            "Controls how many relevant document "
-            "passages are retrieved for each question."
-        ),
-    )
-
-    st.caption(
-        "Higher values provide more context but may "
-        "make answers slower."
-    )
 
     conversation_id = (
         st.session_state.ai_chat_conversation_id

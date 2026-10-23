@@ -213,6 +213,9 @@ def documents_page() -> None:
         ),
     )
 
+    if "document_uploader_generation" not in st.session_state:
+        st.session_state["document_uploader_generation"] = 0
+
     uploaded_files = st.file_uploader(
         "Choose documents",
         type=[
@@ -224,6 +227,11 @@ def documents_page() -> None:
             "png",
         ],
         accept_multiple_files=True,
+        max_upload_size=20,
+        key=(
+            f"document_uploader_"
+            f"{st.session_state['document_uploader_generation']}"
+        ),
         label_visibility="collapsed",
     )
 
@@ -378,7 +386,10 @@ def documents_page() -> None:
                     "Check the error messages above.",
                     icon="⚠️",
                 )
-            if successful:
+            if successful and failed == 0:
+                # Give the uploader a fresh identity so processed files
+                # disappear immediately after a fully successful upload.
+                st.session_state["document_uploader_generation"] += 1
                 st.rerun()
 
     st.divider()
@@ -520,6 +531,12 @@ def documents_page() -> None:
                         )
 
                         if deleted:
+                            # Invalidate the cached graph data so the next
+                            # Knowledge Graph visit reloads from Neo4j.
+                            st.session_state[
+                                "knowledge_graph_refresh_requested"
+                            ] = True
+
                             st.success(
                                 "Document deleted.",
                                 icon="✅",

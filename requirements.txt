@@ -21,4 +21,14 @@ neo4j==6.4.0
 pyvis
 
 extra-streamlit-components==0.1.81
+google-api-python-client
+google-auth
+google-auth-oauthlib
+cryptography
 #  python -m streamlit run app\main.py
+#  python -m app.scripts.knowledge_graph_worker
+
+# Set-Location D:\MemoryNest
+# (.venv) PS D:\MemoryNest> .\.venv\Scripts\Activate.ps1
+
+# python -m app.scripts.dev_launcher

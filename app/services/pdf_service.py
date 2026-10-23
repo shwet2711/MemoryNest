@@ -1,10 +1,10 @@
-
+﻿
 from __future__ import annotations
 
 from io import BytesIO
 from pathlib import Path
 
-import fitz
+import pymupdf as fitz
 from PIL import Image
 
 from app.services.ocr_quality_service import assess_ocr_text

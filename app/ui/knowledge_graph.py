@@ -7,7 +7,12 @@ import streamlit as st
 import streamlit.components.v1 as components
 from pyvis.network import Network
 
+from sqlalchemy import func
+
+from app.db.knowledge_graph_sync_model import KnowledgeGraphSyncJob
+from app.db.session import SessionLocal
 from app.services.knowledge_graph_service import (
+    check_neo4j_connection,
     get_user_knowledge_graph,
 )
 
@@ -213,6 +218,35 @@ def _build_interactive_graph(
     return network.generate_html(), len(entity_ids)
 
 
+def _get_sync_queue_counts(user_id: int) -> dict[str, int]:
+    """Return synchronization job counts for one user only."""
+    counts = {
+        "pending": 0,
+        "processing": 0,
+        "failed": 0,
+        "completed": 0,
+        "cancelled": 0,
+    }
+
+    with SessionLocal() as db:
+        rows = (
+            db.query(
+                KnowledgeGraphSyncJob.status,
+                func.count(KnowledgeGraphSyncJob.id),
+            )
+            .filter(KnowledgeGraphSyncJob.user_id == user_id)
+            .group_by(KnowledgeGraphSyncJob.status)
+            .all()
+        )
+
+    for status, count in rows:
+        if status in counts:
+            counts[status] = int(count)
+
+    return counts
+
+
+@st.fragment(run_every="10s")
 def knowledge_graph_page() -> None:
     """Display the complete knowledge graph for the signed-in user."""
 
@@ -229,60 +263,156 @@ def knowledge_graph_page() -> None:
         return
 
     # --------------------------------------------------------
-    # LOAD COMPLETE GRAPH
+    # CONNECTION, QUEUE MONITORING, AND GRAPH REFRESH
     # --------------------------------------------------------
 
-    cached_user = st.session_state.get(
-        "knowledge_graph_loaded_user"
-    )
+    current_user_id = int(user_id)
+    cached_user = st.session_state.get("knowledge_graph_loaded_user")
+    user_changed = cached_user != current_user_id
+
+    # Never display another user's cached graph after an account switch.
+    if user_changed:
+        st.session_state["knowledge_graph_all_relationships"] = []
+        st.session_state["knowledge_graph_loaded_user"] = current_user_id
+        st.session_state["knowledge_graph_load_error"] = None
+        st.session_state.pop("knowledge_graph_last_queue_signature", None)
+        st.session_state.pop("knowledge_graph_last_neo4j_available", None)
 
     refresh_requested = st.session_state.pop(
         "knowledge_graph_refresh_requested",
         False,
     )
 
-    if (
-        cached_user != int(user_id)
-        or "knowledge_graph_all_relationships" not in st.session_state
+    try:
+        connection = check_neo4j_connection()
+        neo4j_available = bool(
+            connection.get("enabled") and connection.get("available")
+        )
+        connection_message = connection.get(
+            "message",
+            "Neo4j is unavailable. Check its service and configuration.",
+        )
+    except Exception:
+        neo4j_available = False
+        connection_message = (
+            "Could not check Neo4j availability. "
+            "The last successfully loaded graph will be retained."
+        )
+
+    queue_error = None
+    try:
+        queue_counts = _get_sync_queue_counts(current_user_id)
+        queue_signature = tuple(
+            (status, queue_counts[status])
+            for status in ("pending", "processing", "failed", "completed", "cancelled")
+        )
+        previous_signature = st.session_state.get(
+            "knowledge_graph_last_queue_signature"
+        )
+        queue_changed = (
+            previous_signature is not None
+            and previous_signature != queue_signature
+        )
+        st.session_state["knowledge_graph_last_queue_signature"] = queue_signature
+    except Exception:
+        queue_counts = {
+            "pending": 0,
+            "processing": 0,
+            "failed": 0,
+            "completed": 0,
+            "cancelled": 0,
+        }
+        queue_changed = False
+        queue_error = (
+            "Synchronization queue status could not be loaded. "
+            "Check the application database."
+        )
+
+    previous_availability = st.session_state.get(
+        "knowledge_graph_last_neo4j_available"
+    )
+    connection_restored = (
+        neo4j_available and previous_availability is False
+    )
+    st.session_state["knowledge_graph_last_neo4j_available"] = neo4j_available
+
+    has_cached_graph = (
+        "knowledge_graph_all_relationships" in st.session_state
+    )
+    load_error = st.session_state.get("knowledge_graph_load_error")
+
+    # This fragment reruns every 10 seconds. Refresh the live graph even
+    # when queue counts are unchanged, because uploads can write directly
+    # to Neo4j without creating a synchronization job.
+    should_load_graph = (
+        user_changed
+        or not has_cached_graph
         or refresh_requested
-    ):
+        or queue_changed
+        or connection_restored
+        or (load_error is not None and neo4j_available)
+        or neo4j_available
+    )
+
+    if should_load_graph and neo4j_available:
         try:
             with st.spinner("Loading your complete knowledge graph..."):
                 all_relationships = get_user_knowledge_graph(
-                    user_id=int(user_id)
+                    user_id=current_user_id
                 )
 
-            st.session_state[
-                "knowledge_graph_all_relationships"
-            ] = all_relationships
-
-            st.session_state[
-                "knowledge_graph_loaded_user"
-            ] = int(user_id)
-
-            st.session_state[
-                "knowledge_graph_load_error"
-            ] = None
+            st.session_state["knowledge_graph_all_relationships"] = all_relationships
+            st.session_state["knowledge_graph_loaded_user"] = current_user_id
+            st.session_state["knowledge_graph_load_error"] = None
 
         except Exception:
-            st.session_state[
-                "knowledge_graph_load_error"
-            ] = (
-                "Could not load your knowledge graph. "
-                "Check that Neo4j is running and enabled."
+            st.session_state["knowledge_graph_load_error"] = (
+                "Could not refresh your knowledge graph. "
+                "Your last successfully loaded graph is retained."
             )
 
-    load_error = st.session_state.get(
-        "knowledge_graph_load_error"
-    )
+    elif not neo4j_available:
+        st.session_state["knowledge_graph_load_error"] = connection_message
 
-    if load_error:
-        st.error(load_error)
-        return
-
+    load_error = st.session_state.get("knowledge_graph_load_error")
     relationships = st.session_state.get(
         "knowledge_graph_all_relationships",
         [],
+    )
+
+    if not neo4j_available:
+        st.warning(
+            f"**Graph synchronization pending:** {connection_message} "
+            "Document uploads and vector indexing can continue; graph "
+            "updates require Neo4j to become available and the separate "
+            "knowledge graph worker to process queued jobs."
+        )
+    elif queue_counts["pending"] or queue_counts["processing"]:
+        st.info(
+            "**Graph synchronization pending:** "
+            f"{queue_counts['pending']} pending and "
+            f"{queue_counts['processing']} processing job(s). "
+            "The graph will refresh automatically as queue status changes."
+        )
+
+    if load_error and neo4j_available:
+        st.error(load_error)
+
+    if queue_error:
+        st.warning(queue_error)
+
+    st.subheader("Graph synchronization status")
+    queue_col1, queue_col2, queue_col3, queue_col4 = st.columns(4)
+
+    queue_col1.metric("Pending", queue_counts["pending"])
+    queue_col2.metric("Processing", queue_counts["processing"])
+    queue_col3.metric("Failed", queue_counts["failed"])
+    queue_col4.metric("Completed", queue_counts["completed"])
+
+    st.caption(
+        "Status counts belong to your account. Retryable failures are "
+        "returned to Pending by the worker; Failed counts jobs explicitly "
+        "stored with that status."
     )
 
     # --------------------------------------------------------
@@ -327,11 +457,17 @@ def knowledge_graph_page() -> None:
     )
 
     if not relationships:
-        st.info(
-            "No relationships are stored in your graph yet. "
-            "Upload and process documents that contain "
-            "extractable entity relationships."
-        )
+        if load_error:
+            st.info(
+                "No cached graph is available to display yet. "
+                "Once Neo4j is available, use Refresh graph to try loading it."
+            )
+        else:
+            st.info(
+                "No relationships are stored in your graph yet. "
+                "Upload and process documents that contain "
+                "extractable entity relationships."
+            )
         return
 
     # --------------------------------------------------------

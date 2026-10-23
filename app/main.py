@@ -1,3 +1,4 @@
+
 import streamlit as st
 import extra_streamlit_components as stx
 
@@ -13,6 +14,17 @@ from app.ui.ai_chat import ai_chat_page
 from app.ui.summary import summary_page
 from app.ui.knowledge_graph import knowledge_graph_page
 from app.ui.events import events_page
+from app.ui.calendar_view import calendar_page
+from app.ui.memories import memories_page
+from app.ui.search import search_page
+from app.ui.google_calendar import (
+    google_calendar_page,
+    handle_google_oauth_callback,
+)
+from app.ui.gmail_settings import (
+    gmail_settings_page,
+    handle_gmail_oauth_callback,
+)
 
 
 SESSION_COOKIE_NAME = "memorynest_session"
@@ -34,6 +46,7 @@ cookies = stx.CookieManager(key="memorynest_cookies")
 
 def restore_login_from_cookie() -> bool:
     """Restore the logged-in user from a valid browser session cookie."""
+
     token = cookies.get(cookie=SESSION_COOKIE_NAME)
 
     if not token or not isinstance(token, str):
@@ -60,6 +73,14 @@ def main() -> None:
             authentication_page(cookies)
             return
 
+    # Handle Gmail redirects before Calendar so each integration
+    # processes only its own signed OAuth state.
+    if handle_gmail_oauth_callback():
+        return
+
+    if handle_google_oauth_callback():
+        return
+
     selected_page = render_sidebar(cookies)
 
     if selected_page == "Dashboard":
@@ -72,26 +93,18 @@ def main() -> None:
         summary_page()
     elif selected_page == "Events":
         events_page()
+    elif selected_page == "Calendar":
+        # Keep Google Calendar controls within the existing Calendar page.
+        google_calendar_page()
+        calendar_page()
     elif selected_page == "Knowledge Graph":
         knowledge_graph_page()
     elif selected_page == "Memories":
-        placeholder_page(
-            title="Memories",
-            icon="🧠",
-            description="Explore important information extracted from your knowledge base.",
-        )
+        memories_page()
     elif selected_page == "Search":
-        placeholder_page(
-            title="Search",
-            icon="🔎",
-            description="Search your personal knowledge using semantic search.",
-        )
+        search_page()
     elif selected_page == "Settings":
-        placeholder_page(
-            title="Settings",
-            icon="⚙️",
-            description="Manage your MemoryNest account and application preferences.",
-        )
+        gmail_settings_page()
 
 
 if __name__ == "__main__":
