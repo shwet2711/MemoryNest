@@ -1,4 +1,5 @@
-﻿import logging
+
+import logging
 
 import streamlit as st
 
@@ -37,8 +38,12 @@ def render_sidebar(cookies) -> str:
 
     page_labels = list(PAGES.keys())
 
-    # Read the URL only when initializing the widget state.
-    # Do not overwrite the widget state on every rerun.
+    # Apply queued navigation before creating the sidebar radio widget.
+    pending_label = st.session_state.pop("pending_navigation_label", None)
+    if pending_label in PAGES:
+        st.session_state["navigation_radio"] = pending_label
+
+    # Initialize the navigation widget from the URL only once.
     if "navigation_radio" not in st.session_state:
         requested_page = st.query_params.get("page", "Dashboard")
 
@@ -56,6 +61,7 @@ def render_sidebar(cookies) -> str:
     with st.sidebar:
         render_brand()
         st.divider()
+
         st.caption("WORKSPACE")
 
         selected = st.radio(
@@ -68,7 +74,7 @@ def render_sidebar(cookies) -> str:
 
         selected_page = PAGES[selected]
 
-        # Keep the URL aligned with the selected page.
+        # Keep the URL synchronized with the selected page.
         if st.query_params.get("page") != selected_page:
             st.query_params["page"] = selected_page
 
@@ -85,6 +91,7 @@ def render_sidebar(cookies) -> str:
         logout_clicked = st.button(
             "Logout",
             use_container_width=True,
+            key="sidebar_logout",
         )
 
         if logout_clicked:
@@ -99,11 +106,13 @@ def render_sidebar(cookies) -> str:
                 try:
                     db = SessionLocal()
                     revoke_user_session(db, token)
+
                 except Exception:
                     logging.exception(
                         "Failed to revoke the MemoryNest session "
                         "during logout."
                     )
+
                 finally:
                     if db is not None:
                         try:
@@ -116,18 +125,19 @@ def render_sidebar(cookies) -> str:
 
             try:
                 cookies.delete(cookie=SESSION_COOKIE_NAME)
+
             except Exception:
                 logging.exception(
                     "Failed to delete the MemoryNest session cookie "
                     "during logout."
                 )
+
             finally:
                 st.session_state.clear()
                 st.query_params.clear()
                 st.rerun()
 
         st.divider()
-        st.caption("MemoryNest v0.1.0")
         st.caption("Building your second brain.")
 
     return selected_page
